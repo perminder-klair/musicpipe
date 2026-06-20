@@ -1,0 +1,149 @@
+services:
+  hdd-check:
+    image: alpine:latest
+    container_name: musicpipe-hdd-check
+    volumes:
+      - "${LIBRARY_DIR:-/mnt/hdd/navidrome/Library}:/check:ro"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "[ -n \"$(ls -A /check 2>/dev/null)\" ]"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 2s
+    command: ["tail", "-f", "/dev/null"]
+    restart: unless-stopped
+    networks:
+      - music-network
+
+  navidrome:
+    image: deluan/navidrome:latest
+    container_name: navidrome
+    depends_on:
+      hdd-check:
+        condition: service_healthy
+    ports:
+      - "${NAVIDROME_PORT:-4533}:4533"
+    volumes:
+      - "${LIBRARY_DIR:-/mnt/hdd/navidrome/Library}:/music:ro"
+      - "${NAVIDROME_DATA:-/mnt/hdd/navidrome/NavidromeData}:/data"
+    environment:
+      ND_SCANSCHEDULE: 1h
+      ND_LOGLEVEL: info
+      ND_SUBSONIC_DEFAULTREPORTREALPATH: "true"
+      # Last.fm agent — feeds getSimilarSongs2 / getArtistInfo2 / getTopSongs.
+      # Inert until both are set; values live in .env.
+      ND_LASTFM_APIKEY: ${ND_LASTFM_APIKEY}
+      ND_LASTFM_SECRET: ${ND_LASTFM_SECRET}
+    stop_grace_period: 30s
+    restart: unless-stopped
+    networks:
+      - music-network
+
+  beets:
+    image: linuxserver/beets:latest
+    container_name: beets
+    depends_on:
+      hdd-check:
+        condition: service_healthy
+    stdin_open: true
+    tty: true
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1001}
+      - TZ=${TZ:-Europe/London}
+    volumes:
+      - "./beets:/config"
+      # Single parent mount so hardlinks across Incoming<->Library work
+      - "${MUSIC_ROOT:-/mnt/hdd/navidrome}:/music"
+    restart: unless-stopped
+    networks:
+      - music-network
+
+  auto-import:
+    image: linuxserver/beets:latest
+    container_name: auto-import
+    depends_on:
+      hdd-check:
+        condition: service_healthy
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1001}
+      - TZ=${TZ:-Europe/London}
+      - AUTO_IMPORT_INTERVAL=${AUTO_IMPORT_INTERVAL:-300}
+    volumes:
+      - "./beets:/config"
+      - "${MUSIC_ROOT:-/mnt/hdd/navidrome}:/music"
+      - "./scripts/auto-import.sh:/auto-import.sh:ro"
+    entrypoint: /bin/bash
+    command: /auto-import.sh
+    restart: unless-stopped
+    networks:
+      - music-network
+
+  gamdl:
+    build: ./gamdl
+    container_name: gamdl
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Europe/London}
+      USE_TRACK_EXPANSION: ${USE_TRACK_EXPANSION:-0}
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      - ./gamdl/config:/config:ro
+      - ./gamdl/logs:/var/log/gamdl
+      - "${INCOMING_DIR:-/mnt/hdd/navidrome/Incoming}:/downloads"
+    networks:
+      - music-network
+
+  gamdl-ui:
+    build: ./gamdl-ui
+    container_name: gamdl-ui
+    depends_on:
+      hdd-check:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Europe/London}
+      GAMDL_CONFIG_DIR: /config
+      GAMDL_LOGS_DIR: /gamdl-logs
+      GAMDL_DOWNLOADS_DIR: /downloads
+      GAMDL_TEMP_DIR: /tmp/gamdl
+      UI_DATA_DIR: /ui-data
+      NAVIDROME_URL: http://navidrome:4533
+      NAVIDROME_PUBLIC_URL: ${NAVIDROME_PUBLIC_URL:-http://localhost:4533}
+      NAVIDROME_USER: ${NAVIDROME_USER:-admin}
+      NAVIDROME_PASS: ${NAVIDROME_PASS}
+      USE_TRACK_EXPANSION: ${USE_TRACK_EXPANSION:-0}
+      BEETS_CONTAINER_URL: http://beets:8337
+      INDEXER_INTERVAL: ${INDEXER_INTERVAL:-120}
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      - ./gamdl/config:/config
+      - ./gamdl/logs:/gamdl-logs:ro
+      - "${INCOMING_DIR:-/mnt/hdd/navidrome/Incoming}:/downloads"
+      # RW — gamdl-ui's /library/delete endpoint unlinks files here.
+      # Blast radius widened deliberately in Phase B; keep the container
+      # on the private music-network (no external port besides 4150).
+      - "${LIBRARY_DIR:-/mnt/hdd/navidrome/Library}:/library"
+      # Unified mount so indexer.filter_incoming can replace a re-downloaded
+      # duplicate with a hardlink to its Library twin in-place. Separate
+      # /downloads and /library mounts above get "Invalid cross-device link"
+      # even though they're the same host filesystem.
+      - "${MUSIC_ROOT:-/mnt/hdd/navidrome}:/music"
+      - ./gamdl-ui/ui-data:/ui-data
+      - ./beets:/beets-data
+      # One-shot ops scripts (e.g. import-am-library.py). Read-only; anything
+      # the scripts need to write goes to /ui-data.
+      - ./scripts:/scripts:ro
+    ports:
+      - "${GAMDL_UI_PORT:-4150}:4150"
+    networks:
+      - music-network
+
+networks:
+  music-network:
+    driver: bridge

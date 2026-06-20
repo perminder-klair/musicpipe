@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en" class="h-full bg-zinc-950">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Runs — musicpipe</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@2.0.4" crossorigin="anonymous"></script>
+    <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2280%22>🎵</text></svg>">
+    <style>
+        .spinner { display: inline-block; width: 0.9rem; height: 0.9rem; border: 2px solid rgba(255,255,255,.2); border-top-color: rgb(52 211 153); border-radius: 999px; animation: spin 0.8s linear infinite; vertical-align: -0.15rem; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="h-full text-zinc-100 antialiased">
+{% include "_nav.html" %}
+
+<div class="max-w-6xl mx-auto p-6 space-y-6">
+
+    <section class="flex items-end justify-between">
+        <div>
+            <h1 class="text-xl font-semibold tracking-tight">Runs</h1>
+            <p class="text-sm text-zinc-500">Sync history — manual, cron, pre-filter skips. Click "view" to read the log.</p>
+        </div>
+    </section>
+
+    {# Initial paint; the fragment self-refreshes every 5s while on page 1.
+       Deeper pages don't poll, so browsing history stays put. #}
+    <div id="runs" hx-get="/fragments/runs" hx-trigger="load" hx-swap="innerHTML">
+        {% include "_runs.html" %}
+    </div>
+</div>
+
+{% include "_modals.html" %}
+{% include "_shared_scripts.html" %}
+</body>
+</html>

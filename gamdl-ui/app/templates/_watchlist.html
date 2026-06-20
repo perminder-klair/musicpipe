@@ -1,0 +1,76 @@
+{% if not entries %}
+    <div class="rounded-lg border border-dashed border-zinc-800 p-8 text-center text-sm text-zinc-500">
+        Watchlist is empty — add an Apple Music artist or playlist URL above.
+    </div>
+{% else %}
+<ul class="grid gap-4 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+{% for e in entries %}
+    <li class="group rounded-lg border border-zinc-800 bg-zinc-900/40 overflow-hidden flex flex-col">
+        <div class="relative aspect-square bg-zinc-800 overflow-hidden">
+            {% if e.image %}
+                <img src="{{ e.image }}" alt="" class="w-full h-full object-cover" loading="lazy">
+            {% else %}
+                <div class="w-full h-full flex items-center justify-center text-4xl text-zinc-600">
+                    {{ '♪' if e.kind == 'artist' else ('≡' if e.kind == 'playlist' else '◉') }}
+                </div>
+            {% endif %}
+            <span class="absolute top-1.5 left-1.5 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-sm text-zinc-200">{{ e.kind }}</span>
+            {% if e.last_run and e.last_run.status == 'running' %}
+                <span class="absolute top-1.5 right-1.5 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/80 text-emerald-200">
+                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>syncing
+                </span>
+            {% endif %}
+            <div class="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center gap-1.5 p-2">
+                <button class="px-2.5 py-1 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-medium"
+                        onclick="syncOne('{{ e.url }}','{{ e.kind }}', this)">Sync</button>
+                <button class="px-2 py-1 text-xs rounded-md bg-zinc-800/90 hover:bg-zinc-700 text-zinc-100"
+                        title="Tracks" onclick="openTracksModal('{{ e.url }}','{{ e.kind }}','{{ e.title | replace("'", "\\'") }}')">♪</button>
+                <button class="px-2 py-1 text-xs rounded-md bg-zinc-800/90 hover:bg-zinc-700 text-zinc-100"
+                        title="Rename" onclick="renameEntry('{{ e.url }}', '{{ e.title | replace("'", "\\'") }}')">✎</button>
+                <form hx-post="/watchlist/remove" hx-target="#watchlist" hx-confirm="Remove {{ e.title }}?" class="inline">
+                    <input type="hidden" name="url" value="{{ e.url }}">
+                    <input type="hidden" name="kind" value="{{ e.kind }}">
+                    <input type="hidden" name="active_kind" value="{{ active_kind | default('artist') }}">
+                    <button class="px-2 py-1 text-xs rounded-md bg-zinc-800/90 hover:bg-rose-700 text-zinc-100" title="Remove">✕</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="p-3 flex-1 flex flex-col gap-1 min-w-0">
+            <a href="{{ e.url }}" target="_blank" rel="noopener"
+               class="font-medium text-sm truncate hover:underline" title="{{ e.title }}">{{ e.title }}</a>
+            <div class="text-xs text-zinc-500 space-y-0.5 min-w-0">
+                {% if e.library_track_count is not none %}
+                    {% if e.total_tracks %}
+                        <div class="truncate">
+                            {{ e.library_track_count }} / {{ e.total_tracks }} tracks
+                            {% if e.library_track_count >= e.total_tracks %}<span class="text-emerald-400">✓</span>{% endif %}
+                        </div>
+                    {% else %}
+                        <div class="truncate">{{ e.library_track_count }} tracks</div>
+                    {% endif %}
+                {% elif e.total_tracks %}
+                    <div class="truncate">{{ e.total_tracks }} tracks</div>
+                {% endif %}
+                {% if e.last_run %}
+                    {% if e.last_run.status == 'ok' %}
+                        <div class="truncate" title="{{ (e.last_run.finished_at or e.last_run.started_at) | format_ts }}">
+                            synced {{ (e.last_run.finished_at or e.last_run.started_at) | format_ts }}
+                            {% if e.last_run.tracks_new %}<span class="text-emerald-400">+{{ e.last_run.tracks_new }}</span>{% endif %}
+                        </div>
+                    {% elif e.last_run.status == 'interrupted' %}
+                        <div class="text-amber-400 truncate">interrupted {{ (e.last_run.finished_at or e.last_run.started_at) | format_ts }}</div>
+                    {% elif e.last_run.status == 'failed' %}
+                        <div class="text-rose-400 truncate">failed {{ (e.last_run.finished_at or e.last_run.started_at) | format_ts }}</div>
+                    {% elif e.last_run.status == 'running' %}
+                        <div class="text-emerald-400 truncate">syncing…</div>
+                    {% endif %}
+                {% else %}
+                    <div class="text-zinc-600 truncate">never synced</div>
+                {% endif %}
+            </div>
+        </div>
+    </li>
+{% endfor %}
+</ul>
+{% endif %}

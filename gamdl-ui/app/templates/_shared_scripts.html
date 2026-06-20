@@ -1,0 +1,101 @@
+<script>
+// Shared helpers loaded by every full page.
+// Page-specific scripts (SSE driver on dashboard, etc.) live inline on those pages.
+
+function closeLogModal() {
+    document.getElementById('log-modal').classList.add('hidden');
+    document.getElementById('log-modal-body').innerHTML = '<div class="text-sm text-zinc-500">loading…</div>';
+}
+function openLogModalForRun(runId) {
+    htmx.ajax('GET', '/runs/' + runId + '/log', {
+        target: '#log-modal-body',
+        swap: 'innerHTML',
+    });
+    document.getElementById('log-modal').classList.remove('hidden');
+}
+
+let _tracksModalContext = null;
+function openTracksModal(url, kind, title) {
+    _tracksModalContext = { url, kind };
+    document.getElementById('tracks-modal-title').textContent = title || 'Tracks';
+    document.getElementById('tracks-modal-sub').textContent = kind + ' · ' + url;
+    document.getElementById('tracks-modal-body').innerHTML =
+        '<div class="p-6 text-sm text-zinc-500">loading…</div>';
+    document.getElementById('tracks-modal').classList.remove('hidden');
+    const qs = new URLSearchParams({ url, kind }).toString();
+    htmx.ajax('GET', '/fragments/watchlist/tracks?' + qs, {
+        target: '#tracks-modal-body',
+        swap: 'innerHTML',
+    });
+}
+function closeTracksModal() {
+    document.getElementById('tracks-modal').classList.add('hidden');
+    _tracksModalContext = null;
+}
+function refreshTracksModal() {
+    if (!_tracksModalContext) return;
+    const qs = new URLSearchParams(_tracksModalContext).toString();
+    htmx.ajax('GET', '/fragments/watchlist/tracks?' + qs, {
+        target: '#tracks-modal-body',
+        swap: 'innerHTML',
+    });
+}
+async function libInlineAction(path, am_track_id, extra) {
+    const fd = new FormData();
+    fd.set('am_track_id', am_track_id);
+    if (extra) for (const [k, v] of Object.entries(extra)) fd.set(k, v);
+    const r = await fetch(path, { method: 'POST', body: fd });
+    if (!r.ok) { alert('action failed: ' + r.status); return; }
+    refreshTracksModal();
+    const wl = document.getElementById('watchlist');
+    if (wl) {
+        htmx.ajax('GET', '/fragments/watchlist?kind=' + (window.__activeKind || 'artist'), {
+            target: '#watchlist', swap: 'innerHTML',
+        });
+    }
+}
+function deleteTrackInline(id, title) {
+    if (!confirm(`Delete ${title}?\nUnlinks from Library + Incoming; row marked deleted.`)) return;
+    libInlineAction('/library/delete', id);
+}
+function deleteAndBlocklistInline(id, title) {
+    if (!confirm(`Delete and blocklist ${title}?\nNever re-download until unblocklisted.`)) return;
+    libInlineAction('/library/delete', id, { blocklist: 'true' });
+}
+
+// Navidrome + Beets action buttons (present on library page).
+async function navidromeScan(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'scanning…'; }
+    try {
+        await fetch('/navidrome/scan', { method: 'POST' });
+        if (btn) {
+            setTimeout(() => {
+                htmx.ajax('GET', '/fragments/stats', { target: '#stats-box', swap: 'innerHTML' });
+            }, 1500);
+        }
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Scan now'; }
+    }
+}
+async function beetsTrigger(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'triggering…'; }
+    try {
+        await fetch('/beets/trigger', { method: 'POST' });
+        if (btn) {
+            setTimeout(() => {
+                htmx.ajax('GET', '/fragments/beets', { target: '#beets-box', swap: 'innerHTML' });
+            }, 500);
+        }
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Import now'; }
+    }
+}
+
+document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape') return;
+    const logM = document.getElementById('log-modal');
+    const trkM = document.getElementById('tracks-modal');
+    if (logM && !logM.classList.contains('hidden')) closeLogModal();
+    if (trkM && !trkM.classList.contains('hidden')) closeTracksModal();
+});
+</script>

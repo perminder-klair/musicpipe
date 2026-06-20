@@ -1,0 +1,77 @@
+{# Live refresh only on page 1 — keeps deeper history pages stable to browse. #}
+{% if offset == 0 %}
+<div class="hidden" hx-get="/fragments/runs" hx-trigger="every 5s" hx-target="#runs" hx-swap="innerHTML"></div>
+{% endif %}
+{% if not runs %}
+    <div class="rounded-lg border border-dashed border-zinc-800 p-6 text-center text-sm text-zinc-500">No runs yet.</div>
+{% else %}
+<div class="overflow-x-auto rounded-lg border border-zinc-800">
+    <table class="w-full text-sm">
+        <thead class="bg-zinc-900/60 text-zinc-400 text-xs uppercase tracking-wide">
+            <tr>
+                <th class="text-left px-3 py-2">When</th>
+                <th class="text-left px-3 py-2">Kind</th>
+                <th class="text-left px-3 py-2">Target</th>
+                <th class="text-left px-3 py-2">Status</th>
+                <th class="text-right px-3 py-2">New</th>
+                <th class="text-right px-3 py-2">Failed</th>
+                <th class="text-left px-3 py-2">Trigger</th>
+                <th class="text-right px-3 py-2">Log</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-zinc-800">
+            {% for r in runs %}
+            <tr>
+                <td class="px-3 py-2 text-zinc-300">{{ r.started_at | format_ts }}</td>
+                <td class="px-3 py-2"><span class="text-xs uppercase tracking-wide px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">{{ r.kind }}</span></td>
+                <td class="px-3 py-2 text-zinc-400 truncate max-w-sm" title="{{ r.url }}">{{ r.url | truncate_url }}</td>
+                <td class="px-3 py-2">
+                    {% if r.status == 'running' %}<span class="text-emerald-400">running…</span>
+                    {% elif r.status == 'ok' %}<span class="text-emerald-400">ok</span>
+                    {% elif r.status == 'interrupted' %}<span class="text-amber-400" title="Container restart killed the subprocess">interrupted</span>
+                    {% elif r.status == 'failed' %}<span class="text-rose-400">failed ({{ r.exit_code }})</span>
+                    {% else %}<span class="text-zinc-500">{{ r.status }}</span>{% endif %}
+                </td>
+                <td class="px-3 py-2 text-right tabular-nums">{{ r.tracks_new or 0 }}</td>
+                <td class="px-3 py-2 text-right tabular-nums">{{ r.tracks_failed or 0 }}</td>
+                <td class="px-3 py-2 text-zinc-500 text-xs">{{ r.trigger }}</td>
+                <td class="px-3 py-2 text-right">
+                    {% if r.log_path %}
+                    <button class="text-xs text-emerald-400 hover:text-emerald-300"
+                            hx-get="/runs/{{ r.id }}/log"
+                            hx-target="#log-modal-body" hx-swap="innerHTML"
+                            onclick="document.getElementById('log-modal').classList.remove('hidden')">
+                        view
+                    </button>
+                    {% else %}
+                    <span class="text-xs text-zinc-600">—</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="flex items-center justify-between gap-3 mt-3 text-sm">
+    <div class="text-xs text-zinc-500">{{ offset + 1 }}–{{ offset + (runs | length) }} of {{ total }}</div>
+    {% if total_pages > 1 %}
+    <nav class="flex items-center gap-1" hx-target="#runs" hx-swap="innerHTML">
+        <button class="px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 disabled:hover:bg-zinc-800"
+                {% if page <= 1 %}disabled{% else %}hx-get="/fragments/runs?offset={{ (page - 2) * limit }}"{% endif %}>‹ Prev</button>
+        {% for n in pages %}
+            {% if n is none %}
+                <span class="px-1 text-zinc-600">…</span>
+            {% elif n == page %}
+                <span class="px-2.5 py-1 rounded-md bg-emerald-600 text-white tabular-nums">{{ n }}</span>
+            {% else %}
+                <button class="px-2.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 tabular-nums"
+                        hx-get="/fragments/runs?offset={{ (n - 1) * limit }}">{{ n }}</button>
+            {% endif %}
+        {% endfor %}
+        <button class="px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 disabled:hover:bg-zinc-800"
+                {% if page >= total_pages %}disabled{% else %}hx-get="/fragments/runs?offset={{ page * limit }}"{% endif %}>Next ›</button>
+    </nav>
+    {% endif %}
+</div>
+{% endif %}

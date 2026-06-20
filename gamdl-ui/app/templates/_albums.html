@@ -1,0 +1,51 @@
+{# One artist's albums — middle level of the browser. Breadcrumb links back to
+   the artists grid; each album drills into its tracks. Artist-level actions
+   apply to every track and re-render this fragment in place. #}
+<div class="space-y-3">
+    <div class="flex items-center gap-2 text-sm text-zinc-400 flex-wrap">
+        <button class="hover:text-zinc-100"
+                hx-get="/fragments/library/artists" hx-target="#lib-browse" hx-swap="innerHTML">Artists</button>
+        <span class="text-zinc-600">/</span>
+        <span class="text-zinc-100 font-medium">{{ artist }}</span>
+        {% if summary %}
+        <span class="text-xs text-zinc-500">{{ summary.album_count }} albums · {{ summary.track_count }} tracks</span>
+        {% endif %}
+    </div>
+
+    <div class="flex flex-wrap gap-2" hx-target="#lib-browse" hx-swap="innerHTML">
+        <button class="px-2.5 py-1 text-xs rounded-md bg-zinc-800 hover:bg-amber-700"
+                hx-post="/library/artist/action" hx-vals='{{ {"artist": artist, "action": "delete"} | tojson }}'
+                hx-confirm="Delete ALL files for {{ artist }}? Files can be re-downloaded later.">Delete all</button>
+        <button class="px-2.5 py-1 text-xs rounded-md bg-zinc-800 hover:bg-rose-700"
+                hx-post="/library/artist/action" hx-vals='{{ {"artist": artist, "action": "delete_block"} | tojson }}'
+                hx-confirm="Delete + blocklist ALL of {{ artist }}? They will never be re-downloaded.">Delete + block</button>
+        <button class="px-2.5 py-1 text-xs rounded-md bg-zinc-800 hover:bg-rose-700"
+                hx-post="/library/artist/action" hx-vals='{{ {"artist": artist, "action": "block"} | tojson }}'
+                hx-confirm="Blocklist all of {{ artist }} (keep existing files)?">Blocklist all</button>
+    </div>
+
+    {% if not albums %}
+        <div class="p-6 text-sm text-zinc-500">No albums for this artist.</div>
+    {% else %}
+    <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 divide-y divide-zinc-800">
+        {% for al in albums %}
+        <div class="flex items-center gap-3 p-3 hover:bg-zinc-900/40">
+            <button type="button" class="flex-1 min-w-0 text-left"
+                    hx-get="/fragments/library/album/{{ al.am_album_id }}"
+                    hx-target="#lib-browse" hx-swap="innerHTML">
+                <div class="font-medium text-zinc-100 truncate" title="{{ al.album }}">{{ al.album or '—' }}</div>
+                <div class="flex flex-wrap gap-1 mt-1 text-[10px] items-center">
+                    <span class="text-zinc-500">{{ al.track_count }} tracks</span>
+                    {% if al.in_library %}<span class="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300">{{ al.in_library }} library</span>{% endif %}
+                    {% if al.missing %}<span class="px-1.5 py-0.5 rounded bg-sky-950 text-sky-300">{{ al.missing }} missing</span>{% endif %}
+                    {% if al.blocked %}<span class="px-1.5 py-0.5 rounded bg-rose-950 text-rose-300">{{ al.blocked }} blocked</span>{% endif %}
+                </div>
+            </button>
+            <a class="px-2 py-1 text-xs rounded-md bg-zinc-800 hover:bg-emerald-700 whitespace-nowrap"
+               target="_blank" rel="noopener" href="/library/album/{{ al.am_album_id }}/play"
+               title="Open in Navidrome">play</a>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>

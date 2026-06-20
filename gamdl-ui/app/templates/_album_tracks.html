@@ -1,0 +1,55 @@
+{# One album's tracks — deepest level of the browser. Breadcrumb links back to
+   the artists grid and the artist's albums. Album-level actions re-render this
+   fragment; per-track actions reuse _library_row.html's own row swaps. #}
+<div class="space-y-3">
+    <div class="flex items-center gap-2 text-sm text-zinc-400 flex-wrap">
+        <button class="hover:text-zinc-100"
+                hx-get="/fragments/library/artists" hx-target="#lib-browse" hx-swap="innerHTML">Artists</button>
+        <span class="text-zinc-600">/</span>
+        <button class="hover:text-zinc-100"
+                hx-get="/fragments/library/artist?name={{ album.artist_name | urlencode }}"
+                hx-target="#lib-browse" hx-swap="innerHTML">{{ album.artist_name or '—' }}</button>
+        <span class="text-zinc-600">/</span>
+        <span class="text-zinc-100 font-medium truncate">{{ album.album or '—' }}</span>
+    </div>
+
+    <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 flex flex-wrap items-center gap-2">
+        <div class="flex-1 min-w-0">
+            <div class="font-medium truncate" title="{{ album.album }}">{{ album.album or '—' }}</div>
+            <div class="text-xs text-zinc-500">
+                {{ album.track_count }} tracks · <span class="text-emerald-400">{{ album.in_library }} in library</span>{% if album.missing %} · <span class="text-sky-400">{{ album.missing }} missing</span>{% endif %}{% if album.blocked %} · <span class="text-rose-400">{{ album.blocked }} blocked</span>{% endif %}
+            </div>
+        </div>
+        <div class="flex flex-wrap gap-2" hx-target="#lib-browse" hx-swap="innerHTML">
+            {% if album.missing %}
+            <button class="px-2.5 py-1 text-xs rounded-md bg-zinc-800 hover:bg-sky-700 disabled:opacity-40"
+                    hx-post="/library/album/{{ album.am_album_id }}/redownload" hx-swap="none"
+                    hx-on::after-request="this.textContent='queued ✓'; this.disabled=true"
+                    {% if running %}disabled title="a sync is already running"{% endif %}>
+                Re-download missing ({{ album.missing }})</button>
+            {% endif %}
+            <a class="px-2.5 py-1 text-xs rounded-md bg-zinc-800 hover:bg-emerald-700"
+               target="_blank" rel="noopener" href="/library/album/{{ album.am_album_id }}/play">Play in Navidrome</a>
+            <button class="px-2.5 py-1 text-xs rounded-md bg-zinc-800 hover:bg-amber-700"
+                    hx-post="/library/album/{{ album.am_album_id }}/action" hx-vals='{{ {"action": "delete"} | tojson }}'
+                    hx-confirm="Delete all files in “{{ album.album }}”? They can be re-downloaded.">Delete album</button>
+            <button class="px-2.5 py-1 text-xs rounded-md bg-zinc-800 hover:bg-rose-700"
+                    hx-post="/library/album/{{ album.am_album_id }}/action" hx-vals='{{ {"action": "delete_block"} | tojson }}'
+                    hx-confirm="Delete + blocklist “{{ album.album }}”? Never re-download.">Del + block</button>
+        </div>
+    </div>
+
+    {% if not tracks %}
+        <div class="p-6 text-sm text-zinc-500">No tracks recorded for this album.</div>
+    {% else %}
+    <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 overflow-hidden">
+        <table class="w-full text-sm">
+            <tbody>
+                {% for t in tracks %}
+                    {% include "_library_row.html" %}
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>

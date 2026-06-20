@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en" class="h-full bg-zinc-950">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Library — musicpipe</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@2.0.4" crossorigin="anonymous"></script>
+    <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2280%22>🎵</text></svg>">
+    <style>
+        .spinner { display: inline-block; width: 0.9rem; height: 0.9rem; border: 2px solid rgba(255,255,255,.2); border-top-color: rgb(52 211 153); border-radius: 999px; animation: spin 0.8s linear infinite; vertical-align: -0.15rem; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="h-full text-zinc-100 antialiased">
+{% include "_nav.html" %}
+
+<div class="max-w-6xl mx-auto p-6 space-y-6">
+
+    <section class="flex items-end justify-between">
+        <div>
+            <h1 class="text-xl font-semibold tracking-tight">Library</h1>
+            <p class="text-sm text-zinc-500">Tracked downloads + imports. Delete or blocklist to prevent re-downloads.</p>
+        </div>
+    </section>
+
+    {# Navidrome + Beets service cards (moved here from the dashboard) #}
+    <section class="grid gap-3 md:grid-cols-2">
+        <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 flex flex-wrap items-center gap-x-5 gap-y-2">
+            <h3 class="font-medium text-sm">Navidrome</h3>
+            <div id="stats-box" class="flex flex-wrap items-center gap-x-5 gap-y-2 flex-1"
+                 hx-get="/fragments/stats" hx-trigger="load" hx-swap="innerHTML">
+                <div class="text-sm text-zinc-500">loading…</div>
+            </div>
+            <button class="px-2.5 py-1 text-xs rounded-md bg-zinc-800 hover:bg-zinc-700"
+                    onclick="navidromeScan(this)">Scan now</button>
+        </div>
+        <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 flex flex-wrap items-center gap-x-5 gap-y-2">
+            <h3 class="font-medium text-sm">Beets</h3>
+            <div id="beets-box" class="flex flex-wrap items-center gap-x-5 gap-y-2 flex-1"
+                 hx-get="/fragments/beets" hx-trigger="load, every 10s" hx-swap="innerHTML">
+                <div class="text-sm text-zinc-500">loading…</div>
+            </div>
+            <button class="px-2.5 py-1 text-xs rounded-md bg-zinc-800 hover:bg-zinc-700"
+                    onclick="beetsTrigger(this)">Import now</button>
+        </div>
+    </section>
+
+    <section class="grid grid-cols-2 sm:grid-cols-5 gap-2 text-sm">
+        <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+            <div class="text-xs text-zinc-500">total</div>
+            <div class="text-lg tabular-nums">{{ counts.total or 0 }}</div>
+        </div>
+        <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+            <div class="text-xs text-zinc-500">in library</div>
+            <div class="text-lg tabular-nums text-emerald-300">{{ counts.in_library or 0 }}</div>
+        </div>
+        <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3" title="In Incoming, not yet in Library, not soft-deleted — the real import backlog">
+            <div class="text-xs text-zinc-500">pending</div>
+            <div class="text-lg tabular-nums text-sky-300">{{ counts.pending or 0 }}</div>
+        </div>
+        <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+            <div class="text-xs text-zinc-500">deleted</div>
+            <div class="text-lg tabular-nums text-amber-300">{{ counts.deleted or 0 }}</div>
+        </div>
+        <div class="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+            <div class="text-xs text-zinc-500">blocklisted</div>
+            <div class="text-lg tabular-nums text-rose-300">{{ counts.blocklisted or 0 }}</div>
+        </div>
+    </section>
+
+    {# Tab strip: Browse (artist→album→track drill-down) vs Search (flat list) #}
+    <section class="space-y-3">
+        <div class="flex items-center gap-1 border-b border-zinc-800">
+            <button type="button" id="tab-btn-browse" onclick="libTab('browse')"
+                    class="px-3 py-1.5 text-sm rounded-t-md border-b-2 border-emerald-400 text-zinc-100">Browse</button>
+            <button type="button" id="tab-btn-search" onclick="libTab('search')"
+                    class="px-3 py-1.5 text-sm rounded-t-md border-b-2 border-transparent text-zinc-400 hover:text-zinc-100">Search</button>
+        </div>
+
+        {# ---- Browse tab: Artists → Albums → Tracks ---- #}
+        <div id="tab-browse" class="space-y-3">
+            <input name="q" placeholder="Filter artists…"
+                   class="w-full bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 text-sm placeholder:text-zinc-500"
+                   hx-get="/fragments/library/artists" hx-target="#lib-browse" hx-swap="innerHTML"
+                   hx-trigger="input changed delay:250ms">
+            <div id="lib-browse" hx-get="/fragments/library/artists" hx-trigger="load" hx-swap="innerHTML">
+                <div class="p-6 text-sm text-zinc-500">loading…</div>
+            </div>
+        </div>
+
+        {# ---- Search tab: flat track list (original behaviour) ---- #}
+        <div id="tab-search" class="space-y-3 hidden">
+            <form class="flex flex-wrap gap-2 items-center"
+                  hx-get="/fragments/library"
+                  hx-target="#library-rows"
+                  hx-swap="innerHTML"
+                  hx-trigger="input delay:250ms from:find input[name=q], change from:find select, submit">
+                <input name="q" value="{{ q or '' }}" placeholder="Search title, artist, album…"
+                       class="flex-1 min-w-[240px] bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 text-sm placeholder:text-zinc-500">
+                <select name="status" class="bg-zinc-900 border border-zinc-800 rounded-md px-2 py-1.5 text-sm">
+                    <option value="" {% if not status %}selected{% endif %}>All</option>
+                    <option value="in_library" {% if status=='in_library' %}selected{% endif %}>In library</option>
+                    <option value="orphaned" {% if status=='orphaned' %}selected{% endif %}>Incoming only</option>
+                    <option value="deleted" {% if status=='deleted' %}selected{% endif %}>Deleted</option>
+                    <option value="blocklisted" {% if status=='blocklisted' %}selected{% endif %}>Blocklisted</option>
+                </select>
+                <select name="genre" class="bg-zinc-900 border border-zinc-800 rounded-md px-2 py-1.5 text-sm max-w-[200px]">
+                    <option value="" {% if not genre %}selected{% endif %}>All genres</option>
+                    {% for g in genres %}
+                        <option value="{{ g }}" {% if genre==g %}selected{% endif %}>{{ g }}</option>
+                    {% endfor %}
+                </select>
+            </form>
+
+            <div id="library-rows" class="rounded-lg border border-zinc-800 bg-zinc-900/40 overflow-hidden">
+                {% include "_library_rows.html" %}
+            </div>
+        </div>
+    </section>
+</div>
+
+<script>
+// Tab toggle between the Browse drill-down and the flat Search list.
+function libTab(which) {
+    const isBrowse = which === 'browse';
+    document.getElementById('tab-browse').classList.toggle('hidden', !isBrowse);
+    document.getElementById('tab-search').classList.toggle('hidden', isBrowse);
+    const on = 'border-emerald-400 text-zinc-100';
+    const off = 'border-transparent text-zinc-400 hover:text-zinc-100';
+    document.getElementById('tab-btn-browse').className =
+        'px-3 py-1.5 text-sm rounded-t-md border-b-2 ' + (isBrowse ? on : off);
+    document.getElementById('tab-btn-search').className =
+        'px-3 py-1.5 text-sm rounded-t-md border-b-2 ' + (isBrowse ? off : on);
+}
+</script>
+
+{# Sticky bulk-action bar. Hidden until at least one row checkbox is set. #}
+<div id="lib-bulk-bar"
+     class="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 hidden
+            rounded-lg border border-zinc-700 bg-zinc-900/95 backdrop-blur
+            shadow-xl px-3 py-2 flex items-center gap-2 text-sm">
+    <span class="text-zinc-400"><span id="lib-bulk-count">0</span> selected</span>
+    <button type="button"
+            class="px-2.5 py-1 text-xs rounded-md bg-zinc-800 hover:bg-amber-700"
+            hx-post="/library/bulk"
+            hx-vals='{"action": "delete"}'
+            hx-include=".lib-select:checked"
+            hx-swap="none">Delete</button>
+    <button type="button"
+            class="px-2.5 py-1 text-xs rounded-md bg-zinc-800 hover:bg-rose-700"
+            hx-post="/library/bulk"
+            hx-vals='{"action": "delete_block"}'
+            hx-include=".lib-select:checked"
+            hx-swap="none">Del + block</button>
+    <button type="button"
+            class="px-2.5 py-1 text-xs rounded-md bg-zinc-800 hover:bg-rose-700"
+            hx-post="/library/bulk"
+            hx-vals='{"action": "block"}'
+            hx-include=".lib-select:checked"
+            hx-swap="none">Blocklist</button>
+    <button type="button" id="lib-bulk-clear"
+            class="px-2.5 py-1 text-xs rounded-md text-zinc-400 hover:text-zinc-100">Clear</button>
+</div>
+
+{% include "_modals.html" %}
+{% include "_shared_scripts.html" %}
+
+<script>
+// Bulk-select wiring: row checkboxes use class="lib-select"; header has id="lib-select-all".
+// Bar buttons post to /library/bulk with hx-include=".lib-select:checked", so we don't
+// need to own the request lifecycle — we only drive visibility and post-request cleanup.
+(function () {
+    const bar = document.getElementById('lib-bulk-bar');
+    const countEl = document.getElementById('lib-bulk-count');
+    const rowsEl = document.getElementById('library-rows');
+
+    function selected() {
+        return rowsEl.querySelectorAll('.lib-select:checked');
+    }
+    function refresh() {
+        const n = selected().length;
+        countEl.textContent = n;
+        bar.classList.toggle('hidden', n === 0);
+    }
+    function clearSelection() {
+        rowsEl.querySelectorAll('.lib-select:checked').forEach(cb => { cb.checked = false; });
+        const all = document.getElementById('lib-select-all');
+        if (all) all.checked = false;
+        refresh();
+    }
+
+    rowsEl.addEventListener('change', (ev) => {
+        const t = ev.target;
+        if (t.id === 'lib-select-all') {
+            rowsEl.querySelectorAll('.lib-select').forEach(cb => { cb.checked = t.checked; });
+        }
+        if (t.classList.contains('lib-select') || t.id === 'lib-select-all') {
+            refresh();
+        }
+    });
+
+    document.getElementById('lib-bulk-clear').addEventListener('click', clearSelection);
+
+    // After a bulk POST, the server OOB-swaps the affected rows; clear our bar state.
+    document.body.addEventListener('htmx:afterRequest', (ev) => {
+        const url = ev.detail?.requestConfig?.path || '';
+        if (url === '/library/bulk' && ev.detail.successful) clearSelection();
+    });
+
+    // After any HTMX swap (e.g. Load more), ensure the header checkbox reflects state.
+    document.body.addEventListener('htmx:afterSwap', refresh);
+})();
+</script>
+</body>
+</html>

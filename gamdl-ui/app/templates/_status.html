@@ -1,0 +1,28 @@
+{# Header/badge + progress block — live log pane is in index.html so it isn't swapped. #}
+{% if running.run_id %}
+<div class="rounded-lg border border-emerald-900/60 bg-emerald-950/30 p-4 space-y-3"
+     data-syncing="1">
+    <div class="flex items-center gap-2 text-emerald-300">
+        <span class="spinner"></span>
+        <span class="font-medium">Syncing</span>
+        <span class="text-xs uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-900/60 text-emerald-300">
+            {{ running.kind }}
+        </span>
+        <span class="text-sm text-zinc-400 truncate flex-1" title="{{ running.url }}">{{ running.url }}</span>
+        <button onclick="cancelSync(this)"
+                class="px-2.5 py-1 text-xs rounded-md bg-red-800 hover:bg-red-700 text-red-100 shrink-0">
+            Cancel
+        </button>
+    </div>
+    <div id="progress-block" hx-get="/fragments/progress" hx-trigger="load, every 1s"
+         hx-swap="innerHTML">
+        {% include "_progress.html" %}
+    </div>
+</div>
+{% else %}
+<div class="rounded-lg border border-zinc-800 bg-zinc-900/30 p-3 text-sm text-zinc-400 flex items-center justify-between"
+     data-syncing="0">
+    <span>Idle</span>
+    <span class="text-xs text-zinc-500">Cron runs nightly at 03:00 Europe/London</span>
+</div>
+{% endif %}

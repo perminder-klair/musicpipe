@@ -1,0 +1,10 @@
+# Apple Music artist URLs — one per line. Managed by gamdl-ui.
+# Lines starting with # are ignored. Blank lines are ignored.
+#
+# Copy this file to artists.txt and add your own artists:
+#   cp artists.example.txt artists.txt
+#
+# gamdl downloads the artist's full discography (new releases on each run).
+#
+# Example (replace with your own):
+# https://music.apple.com/us/artist/some-artist/1234567890

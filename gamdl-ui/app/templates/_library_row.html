@@ -1,0 +1,61 @@
+<tr id="track-row-{{ t.am_track_id }}"{% if oob %} hx-swap-oob="true"{% endif %} class="hover:bg-zinc-900/40">
+    <td class="px-3 py-2 w-8">
+        <input type="checkbox" class="lib-select accent-rose-500"
+               name="am_track_id" value="{{ t.am_track_id }}"
+               aria-label="Select track">
+    </td>
+    <td class="px-3 py-2 min-w-0">
+        <div class="font-medium text-zinc-100 truncate" title="{{ t.title }}">{{ t.title or '—' }}</div>
+        <div class="text-[10px] text-zinc-600 font-mono">{{ t.am_track_id }}</div>
+    </td>
+    <td class="px-3 py-2 text-zinc-300">{{ t.artist or t.album_artist or '—' }}</td>
+    <td class="px-3 py-2 text-zinc-300 truncate max-w-[240px]" title="{{ t.album }}">{{ t.album or '—' }}</td>
+    <td class="px-3 py-2 space-x-1 whitespace-nowrap">
+        {% if t.library_path %}
+            <span class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300">library</span>
+        {% endif %}
+        {% if t.incoming_path %}
+            <span class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-sky-950 text-sky-300">incoming</span>
+        {% endif %}
+        {% if t.deleted_at %}
+            <span class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-amber-950 text-amber-300">deleted</span>
+        {% endif %}
+        {% if t.blocklisted %}
+            <span class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-rose-950 text-rose-300">blocked</span>
+        {% endif %}
+    </td>
+    <td class="px-3 py-2 text-right whitespace-nowrap">
+        {% set row_target = '#track-row-' ~ t.am_track_id %}
+        {% if not t.deleted_at %}
+            <button class="px-2 py-1 text-xs rounded-md bg-zinc-800 hover:bg-amber-700"
+                    hx-post="/library/delete"
+                    hx-vals='{"am_track_id": "{{ t.am_track_id }}"}'
+                    hx-target="{{ row_target }}" hx-swap="outerHTML"
+                    title="Delete files, mark deleted (re-downloadable)">del</button>
+            <button class="px-2 py-1 text-xs rounded-md bg-zinc-800 hover:bg-rose-700"
+                    hx-post="/library/delete"
+                    hx-vals='{"am_track_id": "{{ t.am_track_id }}", "blocklist": "true"}'
+                    hx-target="{{ row_target }}" hx-swap="outerHTML"
+                    title="Delete + blocklist (never re-download)">del + block</button>
+        {% else %}
+            <button class="px-2 py-1 text-xs rounded-md bg-zinc-800 hover:bg-emerald-700"
+                    hx-post="/library/undelete"
+                    hx-vals='{"am_track_id": "{{ t.am_track_id }}"}'
+                    hx-target="{{ row_target }}" hx-swap="outerHTML"
+                    title="Unmark deleted — next sync can pull this again">undel</button>
+        {% endif %}
+        {% if t.blocklisted %}
+            <button class="px-2 py-1 text-xs rounded-md bg-zinc-800 hover:bg-emerald-700"
+                    hx-post="/library/blocklist"
+                    hx-vals='{"am_track_id": "{{ t.am_track_id }}", "on": "false"}'
+                    hx-target="{{ row_target }}" hx-swap="outerHTML"
+                    title="Remove from blocklist">unblock</button>
+        {% else %}
+            <button class="px-2 py-1 text-xs rounded-md bg-zinc-800 hover:bg-rose-700"
+                    hx-post="/library/blocklist"
+                    hx-vals='{"am_track_id": "{{ t.am_track_id }}", "on": "true"}'
+                    hx-target="{{ row_target }}" hx-swap="outerHTML"
+                    title="Blocklist without deleting files">block</button>
+        {% endif %}
+    </td>
+</tr>

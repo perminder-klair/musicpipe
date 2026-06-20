@@ -1,0 +1,58 @@
+# Secrets / local env
+.env
+.env.local
+
+# Apple Music session cookies
+gamdl/config/cookies.txt
+
+# Personal watchlists — ship only the *.example.txt templates
+gamdl/config/albums.txt
+gamdl/config/artists.txt
+gamdl/config/playlists.txt
+
+# beets Discogs API token (create your own via `beet discogs`)
+beets/discogs_token.json
+
+# Runtime logs
+gamdl/logs/
+beets/auto-import.log
+beets/beet.log
+
+# beets runtime state
+beets/state.pickle
+beets/state.pickle.bak-*
+beets/musiclibrary.blb
+beets/.import-status
+beets/.trigger-import
+
+# gamdl-ui SQLite + run logs
+gamdl-ui/ui-data/
+
+# Generated Apple Music library exports (produced by scripts/)
+scripts/Music-Library.xml
+scripts/All-The-Music.txt
+scripts/Songs.csv
+scripts/am-library.tsv
+scripts/am-library.applescript.tsv
+
+# Generated reports & one-off cleanup manifests
+missing-tracks-report.txt
+incoming-purge-manifest-*.txt
+
+# Personal deferred-work / ops notes
+PHASE4_CLEANUP.md
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Personal agent skills / harness config
+.claude/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/

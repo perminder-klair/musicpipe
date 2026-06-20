@@ -1,0 +1,8 @@
+# Apple Music playlist URLs — one per line. Managed by gamdl-ui.
+# Lines starting with # are ignored. Blank lines are ignored.
+#
+# Copy this file to playlists.txt and add your own playlists:
+#   cp playlists.example.txt playlists.txt
+#
+# Example (replace with your own):
+# https://music.apple.com/us/playlist/some-playlist/pl.0123456789abcdef0123456789abcdef

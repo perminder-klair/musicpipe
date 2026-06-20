@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en" class="h-full bg-zinc-950">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>musicpipe</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@2.0.4" crossorigin="anonymous"></script>
+    <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2280%22>🎵</text></svg>">
+    <style>
+        .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+        .spinner { display: inline-block; width: 0.9rem; height: 0.9rem; border: 2px solid rgba(255,255,255,.2); border-top-color: rgb(52 211 153); border-radius: 999px; animation: spin 0.8s linear infinite; vertical-align: -0.15rem; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="h-full text-zinc-100 antialiased">
+{% include "_nav.html" %}
+
+<div class="max-w-6xl mx-auto p-6 space-y-6">
+
+    <section class="flex items-end justify-between">
+        <div>
+            <h1 class="text-xl font-semibold tracking-tight">Dashboard</h1>
+            <p class="text-sm text-zinc-500">Watchlist, live sync, quick actions.</p>
+        </div>
+    </section>
+
+    <section id="status-box" hx-get="/fragments/status" hx-trigger="load, every 3s" hx-swap="innerHTML">
+        {% include "_status.html" %}
+    </section>
+
+    {# Stable log pane — lives here (outside the swapped status-box) so SSE persists across status refreshes. #}
+    <section id="log-pane-wrapper" class="hidden space-y-2">
+        <div class="flex items-center justify-between text-xs text-zinc-500">
+            <span>Live log</span>
+            <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                <input id="autoscroll-toggle" type="checkbox" checked
+                       class="rounded border-zinc-700 bg-zinc-900 text-emerald-500 focus:ring-emerald-500">
+                <span>autoscroll</span>
+            </label>
+        </div>
+        <pre id="log-pane" class="text-xs font-mono bg-zinc-950 border border-zinc-800 rounded p-3 h-80 overflow-auto whitespace-pre-wrap break-words leading-relaxed text-zinc-300"></pre>
+    </section>
+
+    <section class="space-y-4">
+        <div class="flex items-center justify-between">
+            <h2 class="text-lg font-medium">Watchlist</h2>
+            <div class="flex gap-2">
+                <button class="px-3 py-1.5 text-sm rounded-md bg-zinc-800 hover:bg-zinc-700"
+                        hx-post="/meta/refresh" hx-target="#watchlist" hx-indicator="#refresh-spinner"
+                        hx-vals='js:{active_kind: window.__activeKind || "artist"}'>
+                    <span id="refresh-spinner" class="htmx-indicator spinner"></span>
+                    Refresh metadata
+                </button>
+                <button class="px-3 py-1.5 text-sm rounded-md bg-emerald-700 hover:bg-emerald-600"
+                        onclick="syncAll()">Sync all</button>
+            </div>
+        </div>
+
+        {# Tab bar — filters by kind. Active tab is server-rendered; clicks swap via HTMX. #}
+        <div class="flex items-center gap-1 border-b border-zinc-800 -mb-px" role="tablist">
+            {% for tab_key, tab_label in [('artist','Artists'), ('album','Albums'), ('playlist','Playlists')] %}
+                {% set is_active = active_kind == tab_key %}
+                <button role="tab"
+                        class="px-3 py-2 text-sm font-medium border-b-2 -mb-px
+                               {% if is_active %}border-emerald-500 text-zinc-100{% else %}border-transparent text-zinc-400 hover:text-zinc-200{% endif %}"
+                        hx-get="/fragments/watchlist?kind={{ tab_key }}"
+                        hx-target="#watchlist"
+                        hx-swap="innerHTML"
+                        onclick="window.__activeKind='{{ tab_key }}'; document.querySelectorAll('[data-active-kind]').forEach(el=>el.value='{{ tab_key }}'); document.querySelectorAll('[role=tab]').forEach(el=>el.classList.remove('border-emerald-500','text-zinc-100'));document.querySelectorAll('[role=tab]').forEach(el=>el.classList.add('border-transparent','text-zinc-400'));this.classList.remove('border-transparent','text-zinc-400');this.classList.add('border-emerald-500','text-zinc-100');">
+                    {{ tab_label }}
+                    <span class="ml-1 text-xs tabular-nums text-zinc-500">{{ counts[tab_key] }}</span>
+                </button>
+            {% endfor %}
+        </div>
+
+        {# Add form — the item's kind follows the active tab (hidden input updated
+           by tab onclick). No user-facing dropdown. #}
+        <form class="flex gap-2" hx-post="/watchlist/add" hx-target="#watchlist"
+              hx-on::after-request="if(event.detail.successful) this.elements['url'].value=''">
+            <input name="url" required placeholder="https://music.apple.com/..."
+                   class="flex-1 bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 text-sm placeholder:text-zinc-500">
+            <input type="hidden" name="kind" value="{{ active_kind }}" data-active-kind>
+            <button class="px-4 py-1.5 text-sm rounded-md bg-zinc-100 text-zinc-900 hover:bg-white font-medium">Add</button>
+        </form>
+
+        <div id="watchlist">
+            {% include "_watchlist.html" %}
+        </div>
+    </section>
+</div>
+
+{% include "_modals.html" %}
+{% include "_shared_scripts.html" %}
+
+<script>
+// Seed the active-kind global from the server-rendered tab so Refresh/Rename
+// post the right filter even before the user clicks any tab.
+window.__activeKind = '{{ active_kind }}';
+</script>
+<script>
+// Persistent SSE driver — opens on first sync, stays open until the server
+// signals done. Lives here (outside the 3s-auto-refreshing status-box) so
+// the EventSource isn't torn down and re-created every tick. Browser's
+// built-in EventSource sends Last-Event-ID automatically on reconnect, so
+// the server can resume from the exact seq we last saw.
+const MAX_LOG_LINES = 500;
+function appendLog(text) {
+    const pre = document.getElementById('log-pane');
+    if (!pre) return;
+    // Sticky-bottom: only autoscroll if the user was already pinned to the
+    // bottom before this line arrived, OR if the autoscroll toggle is on and
+    // they haven't scrolled up significantly. Checked before append.
+    const toggle = document.getElementById('autoscroll-toggle');
+    const autoscrollOn = !toggle || toggle.checked;
+    const stuckToBottom = (pre.scrollHeight - pre.clientHeight - pre.scrollTop) < 24;
+    pre.textContent += text + "\n";
+    const lines = pre.textContent.split("\n");
+    if (lines.length > MAX_LOG_LINES) {
+        pre.textContent = lines.slice(-MAX_LOG_LINES).join("\n");
+    }
+    if (autoscrollOn && stuckToBottom) pre.scrollTop = pre.scrollHeight;
+}
+function showLogPane(show) {
+    document.getElementById('log-pane-wrapper').classList.toggle('hidden', !show);
+}
+function openSSE() {
+    if (window.__sse) return; // idempotent
+    showLogPane(true);
+    document.getElementById('log-pane').textContent = '';
+    const es = new EventSource('/sync/stream');
+    window.__sse = es;
+    es.onmessage = (ev) => appendLog(ev.data);
+    es.addEventListener('done', () => {
+        es.close();
+        window.__sse = null;
+        // No runs section on dashboard anymore — just refresh watchlist + status.
+        htmx.ajax('GET', '/fragments/watchlist',{target:'#watchlist',swap:'innerHTML'});
+        htmx.ajax('GET', '/fragments/status',   {target:'#status-box',swap:'innerHTML'});
+    });
+}
+
+document.body.addEventListener('htmx:afterSwap', (ev) => {
+    if (ev.detail.target && ev.detail.target.id === 'status-box') {
+        if (document.querySelector('[data-syncing="1"]')) openSSE();
+    }
+});
+window.addEventListener('DOMContentLoaded', () => {
+    if (document.querySelector('[data-syncing="1"]')) openSSE();
+});
+
+function scrollToStatus() {
+    const el = document.getElementById('status-box');
+    if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'});
+    else window.scrollTo({top: 0, behavior: 'smooth'});
+}
+async function syncOne(url, kind, btn) {
+    btn.disabled = true;
+    scrollToStatus();
+    try {
+        const fd = new FormData();
+        fd.append('url', url);
+        fd.append('kind', kind);
+        const r = await fetch('/sync/one', {method: 'POST', body: fd});
+        if (!r.ok) { alert('sync failed: ' + await r.text()); }
+        htmx.ajax('GET', '/fragments/status', {target:'#status-box', swap:'innerHTML'});
+    } finally {
+        btn.disabled = false;
+    }
+}
+async function syncAll() {
+    scrollToStatus();
+    const r = await fetch('/sync/all', {method:'POST'});
+    if (!r.ok) { alert('sync failed: ' + await r.text()); return; }
+    htmx.ajax('GET', '/fragments/status', {target:'#status-box', swap:'innerHTML'});
+}
+async function cancelSync(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
+    const r = await fetch('/sync/cancel', {method:'POST'});
+    if (!r.ok && r.status !== 409) { alert('cancel failed: ' + await r.text()); }
+    htmx.ajax('GET', '/fragments/status', {target:'#status-box', swap:'innerHTML'});
+}
+async function renameEntry(url, current) {
+    const name = prompt('Display name:', current || '');
+    if (name === null || name.trim() === '') return;
+    const fd = new FormData();
+    fd.append('url', url);
+    fd.append('title', name.trim());
+    fd.append('active_kind', window.__activeKind || 'artist');
+    const r = await fetch('/meta/rename', {method:'POST', body: fd});
+    if (!r.ok) { alert('rename failed: ' + await r.text()); return; }
+    const html = await r.text();
+    document.getElementById('watchlist').innerHTML = html;
+}
+</script>
+</body>
+</html>

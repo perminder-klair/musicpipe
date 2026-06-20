@@ -1,0 +1,33 @@
+{% set b = beets %}
+<div class="flex items-baseline gap-1.5 text-sm" title="Files currently in Incoming. Most are legacy hardlinks sharing inodes with Library; beets' incremental flag already skips them.">
+    <span class="text-zinc-400">Incoming</span>
+    <span class="tabular-nums text-zinc-300">{{ b.queue_count }}</span>
+</div>
+<div class="flex items-baseline gap-1.5 text-sm" title="Tracks awaiting their first import into Library (incoming_path set, library_path null).">
+    <span class="text-zinc-400">Pending</span>
+    <span class="tabular-nums {% if b.pending_count %}text-amber-300 font-medium{% else %}text-zinc-300{% endif %}">{{ b.pending_count }}</span>
+</div>
+<div class="flex items-baseline gap-1.5 text-sm">
+    <span class="text-zinc-400">Status</span>
+    {% if b.running %}
+        <span class="inline-flex items-center gap-1.5 text-emerald-400">
+            <span class="spinner" style="width:0.7rem;height:0.7rem"></span>
+            running{% if b.last_activity_at %} · last activity {{ b.last_activity_at | format_ago }}{% endif %}
+        </span>
+    {% elif b.trigger_pending %}
+        <span class="text-amber-400">trigger queued…</span>
+    {% else %}
+        <span class="text-zinc-500">idle</span>
+    {% endif %}
+</div>
+{% if b.last_finished_at %}
+<div class="flex items-baseline gap-1.5 text-sm" title="{{ b.last_finished_at | format_ts }}">
+    <span class="text-zinc-400">Last</span>
+    <span class="tabular-nums text-zinc-300">{{ b.last_finished_at | format_ts }}</span>
+    {% if b.last_outcome == 'ok' %}
+        <span class="text-emerald-400 text-xs">ok</span>
+    {% elif b.last_outcome %}
+        <span class="text-rose-400 text-xs">{{ b.last_outcome }}</span>
+    {% endif %}
+</div>
+{% endif %}

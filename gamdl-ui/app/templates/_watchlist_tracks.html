@@ -1,0 +1,52 @@
+{% if note %}
+    <div class="px-3 py-4 text-sm text-zinc-500">{{ note }}</div>
+{% elif not tracks %}
+    <div class="px-3 py-4 text-sm text-zinc-500">No tracks tracked yet. Sync this entry once and they'll appear here.</div>
+{% else %}
+<table class="w-full text-xs">
+    <thead class="text-[10px] uppercase tracking-wide text-zinc-500">
+        <tr>
+            <th class="text-left px-3 py-1.5 font-medium">Track</th>
+            <th class="text-left px-3 py-1.5 font-medium">Album</th>
+            <th class="text-left px-3 py-1.5 font-medium">State</th>
+            <th class="text-right px-3 py-1.5 font-medium">Actions</th>
+        </tr>
+    </thead>
+    <tbody class="divide-y divide-zinc-900">
+        {% for t in tracks %}
+        <tr class="hover:bg-zinc-900/40">
+            <td class="px-3 py-1.5 min-w-0">
+                <div class="font-medium text-zinc-100 truncate" title="{{ t.title }}">{{ t.title or '—' }}</div>
+                <div class="text-[10px] text-zinc-600 truncate">{{ t.artist or '—' }}</div>
+            </td>
+            <td class="px-3 py-1.5 text-zinc-400 truncate max-w-[180px]" title="{{ t.album }}">{{ t.album or '—' }}</td>
+            <td class="px-3 py-1.5 space-x-1 whitespace-nowrap">
+                {% if t.library_path %}<span class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300">lib</span>{% endif %}
+                {% if t.incoming_path %}<span class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-sky-950 text-sky-300">in</span>{% endif %}
+                {% if t.deleted_at %}<span class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-amber-950 text-amber-300">del</span>{% endif %}
+                {% if t.blocklisted %}<span class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-rose-950 text-rose-300">blk</span>{% endif %}
+            </td>
+            <td class="px-3 py-1.5 text-right whitespace-nowrap">
+                {% set title_js = (t.title or t.am_track_id) | replace("'", "\\'") | replace('"', '\\"') %}
+                {% if not t.deleted_at %}
+                    <button class="px-1.5 py-0.5 text-[10px] rounded-md bg-zinc-800 hover:bg-amber-700"
+                            onclick="deleteTrackInline('{{ t.am_track_id }}','{{ title_js }}','{{ scope_token }}')">del</button>
+                    <button class="px-1.5 py-0.5 text-[10px] rounded-md bg-zinc-800 hover:bg-rose-700"
+                            onclick="deleteAndBlocklistInline('{{ t.am_track_id }}','{{ title_js }}','{{ scope_token }}')">del+blk</button>
+                {% else %}
+                    <button class="px-1.5 py-0.5 text-[10px] rounded-md bg-zinc-800 hover:bg-emerald-700"
+                            onclick="libInlineAction('/library/undelete', '{{ t.am_track_id }}', '{{ scope_token }}')">undel</button>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% if has_more %}
+<div class="p-2 text-center">
+    <button class="px-2 py-1 text-[10px] rounded-md bg-zinc-800 hover:bg-zinc-700"
+            hx-get="/fragments/watchlist/tracks?url={{ url | urlencode }}&kind={{ kind }}&offset={{ offset + limit }}&append=1"
+            hx-target="closest div" hx-swap="outerHTML">Load more</button>
+</div>
+{% endif %}
+{% endif %}

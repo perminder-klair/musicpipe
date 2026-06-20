@@ -1,0 +1,4 @@
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+# Daily at 03:00 Europe/London (container TZ)
+0 3 * * * gamdl /usr/local/bin/run.sh >> /var/log/gamdl/cron.log 2>&1

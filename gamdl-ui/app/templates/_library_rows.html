@@ -1,0 +1,49 @@
+{% if not tracks %}
+    <div class="p-8 text-center text-sm text-zinc-500">No tracks match.</div>
+{% else %}
+<table class="w-full text-sm">
+    <thead class="text-xs uppercase tracking-wide text-zinc-500 bg-zinc-900/60">
+        <tr>
+            <th class="text-left px-3 py-2 font-medium w-8">
+                <input type="checkbox" id="lib-select-all" class="accent-rose-500"
+                       aria-label="Select all visible tracks">
+            </th>
+            <th class="text-left px-3 py-2 font-medium">Title</th>
+            <th class="text-left px-3 py-2 font-medium">Artist</th>
+            <th class="text-left px-3 py-2 font-medium">Album</th>
+            <th class="text-left px-3 py-2 font-medium">State</th>
+            <th class="text-right px-3 py-2 font-medium">Actions</th>
+        </tr>
+    </thead>
+    <tbody class="divide-y divide-zinc-900">
+        {% for t in tracks %}
+            {% include "_library_row.html" %}
+        {% endfor %}
+    </tbody>
+</table>
+{% set qs = "q=" ~ (q | urlencode) ~ "&status=" ~ (status or '') ~ "&genre=" ~ ((genre or '') | urlencode) %}
+<div class="flex items-center justify-between gap-3 p-3 border-t border-zinc-900 text-sm">
+    <div class="text-xs text-zinc-500">
+        {{ offset + 1 }}–{{ offset + (tracks | length) }} of {{ total }}
+    </div>
+    {% if total_pages > 1 %}
+    <nav class="flex items-center gap-1"
+         hx-target="#library-rows" hx-swap="innerHTML" hx-push-url="false">
+        <button class="px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 disabled:hover:bg-zinc-800"
+                {% if page <= 1 %}disabled{% else %}hx-get="/fragments/library?{{ qs }}&offset={{ (page - 2) * limit }}"{% endif %}>‹ Prev</button>
+        {% for n in pages %}
+            {% if n is none %}
+                <span class="px-1 text-zinc-600">…</span>
+            {% elif n == page %}
+                <span class="px-2.5 py-1 rounded-md bg-emerald-600 text-white tabular-nums">{{ n }}</span>
+            {% else %}
+                <button class="px-2.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 tabular-nums"
+                        hx-get="/fragments/library?{{ qs }}&offset={{ (n - 1) * limit }}">{{ n }}</button>
+            {% endif %}
+        {% endfor %}
+        <button class="px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 disabled:hover:bg-zinc-800"
+                {% if page >= total_pages %}disabled{% else %}hx-get="/fragments/library?{{ qs }}&offset={{ page * limit }}"{% endif %}>Next ›</button>
+    </nav>
+    {% endif %}
+</div>
+{% endif %}

@@ -1,0 +1,8 @@
+# Apple Music album URLs — one per line. Managed by gamdl-ui.
+# Lines starting with # are ignored. Blank lines are ignored.
+#
+# Copy this file to albums.txt and add your own albums:
+#   cp albums.example.txt albums.txt
+#
+# Example (replace with your own):
+# https://music.apple.com/us/album/some-album/1234567890

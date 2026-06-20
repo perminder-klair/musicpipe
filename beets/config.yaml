@@ -1,0 +1,107 @@
+directory: /music/Library
+library: /config/musiclibrary.blb
+
+import:
+    # Phase D: import MOVES files out of Incoming into Library.
+    # Previously used hardlink:yes so Incoming doubled as a skip-cache for
+    # gamdl; now the tracks DB in gamdl-ui is the state of record and
+    # Incoming is a true ephemeral staging area.
+    move: yes
+    # incremental was poisoning re-imports: once a dir was in taghistory,
+    # beets skipped it forever, so re-downloaded "missing" tracks never
+    # landed in Library and got re-downloaded every night (the treadmill).
+    # Incoming is ephemeral (move:yes drains it each run), so there is no
+    # backlog to re-scan — incremental's optimization buys nothing here.
+    incremental: no
+    write: yes
+    copy: no
+    quiet_fallback: asis
+    # gamdl downloads albums in inconsistent subsets across nights (pre-check
+    # only hands it the tracks it thinks are missing). `remove` treated each
+    # re-import as a whole-album duplicate and REPLACED the prior copy with the
+    # new (often smaller) set, so piecemeal albums never accumulated — the last
+    # partial import won and the rest were wiped (~436 tracks lost this way).
+    # `merge` fixed the wipe but RELOCATES existing album items on re-import,
+    # which crashes (FileNotFoundError) on stale beets-DB entries left behind by
+    # the old `remove` wipes. `keep` imports only the new tracks as a separate
+    # album (aunique-disambiguated folder) and never touches existing items —
+    # no wipe, no crash. Navidrome groups by tags, so split folders still show
+    # as one album. resolve-urls/pre-check (ISRC+signature) stops re-downloads,
+    # so this doesn't proliferate duplicate folders.
+    duplicate_action: keep
+    timid: no
+    log: /config/beet.log
+
+replace:
+    '[\\/]': _
+    '^\.': _
+    '[\x00-\x1f]': _
+    '[<>:"\?\*\|]': _
+    '\.$': _
+    '\s+$': ''
+
+paths:
+    default: '%if{$albumartist,$albumartist,$artist}/$album%aunique{}/$track - $title'
+    singleton: Non-Album/$artist/$title
+    comp: Compilations/$album%aunique{}/$track - $title
+
+plugins: fetchart lastgenre embedart web discogs
+    
+musicbrainz:
+    searchlimit: 5
+    extra_tags: [year, catalognum, country, media, label]
+
+match:
+    strong_rec_thresh: 0.04
+    medium_rec_thresh: 0.25
+    rec_gap_thresh: 0.25
+    max_rec:
+        missing_tracks: medium
+        unmatched_tracks: medium
+    distance_weights:
+        source: 2.0
+        artist: 3.0
+        album: 3.0
+        media: 1.0
+        mediums: 1.0
+        year: 1.0
+        country: 0.5
+        label: 0.5
+        catalognum: 0.5
+        albumdisambig: 0.5
+        album_id: 5.0
+        tracks: 2.0
+        missing_tracks: 0.9
+        unmatched_tracks: 0.6
+        track_title: 3.0
+        track_artist: 2.0
+        track_index: 1.0
+        track_length: 2.0
+        track_id: 5.0
+
+fetchart:
+    auto: yes
+    cautious: yes
+    cover_names: cover folder
+    sources:
+        - filesystem
+        - coverart
+        - itunes
+        - albumart
+
+embedart:
+    auto: yes
+    maxwidth: 1000
+    quality: 95
+
+lastgenre:
+    auto: yes
+    source: album
+
+
+discogs:
+    source_weight: 0.5
+
+web:
+    host: 0.0.0.0
+    port: 8337

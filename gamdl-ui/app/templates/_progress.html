@@ -1,0 +1,53 @@
+{# Structured progress block — polled every 1s while a sync is active. #}
+{% if running.run_id %}
+    {% set p = running.progress %}
+    {% set idx = p.current_track_idx %}
+    {% set tot = p.current_track_total %}
+    {% set pct = p.current_pct %}
+    {% set run_pct = (idx / tot * 100) if (idx and tot) else 0 %}
+
+    <div class="space-y-2">
+        <div class="flex items-center justify-between text-sm">
+            <div class="flex items-center gap-2 min-w-0">
+                <span class="font-medium text-zinc-200 truncate" title="{{ p.current_track_name or '' }}">
+                    {% if p.current_track_name %}
+                        {{ p.current_track_name }}
+                    {% else %}
+                        <span class="text-zinc-500">preparing…</span>
+                    {% endif %}
+                </span>
+            </div>
+            <div class="text-xs text-zinc-400 tabular-nums shrink-0 pl-3">
+                {% if idx and tot %}track {{ idx }} / {{ tot }}{% endif %}
+                {% if pct is not none %} · {{ '%.0f' % pct }}%{% endif %}
+                {% if p.current_frag %} · frag {{ p.current_frag }}{% endif %}
+                {% if p.current_track_retries %}
+                    <span class="ml-1 inline-flex items-center gap-0.5 text-amber-400"
+                          title="yt-dlp restarted this track's download — slow network or upstream 403 / rate-limit">
+                        ↻ retry ×{{ p.current_track_retries }}
+                    </span>
+                {% endif %}
+            </div>
+        </div>
+
+        {# Per-track download bar (thin) #}
+        <div class="h-1 w-full bg-zinc-800 rounded overflow-hidden">
+            <div class="h-full bg-emerald-500 transition-all duration-200"
+                 style="width: {{ pct if pct is not none else 0 }}%"></div>
+        </div>
+
+        {# Run-level bar (thicker, different shade) #}
+        {% if idx and tot %}
+        <div class="h-1.5 w-full bg-zinc-800 rounded overflow-hidden">
+            <div class="h-full bg-emerald-700 transition-all duration-500"
+                 style="width: {{ run_pct }}%"></div>
+        </div>
+        {% endif %}
+
+        <div class="flex items-center gap-4 text-xs text-zinc-400 tabular-nums">
+            <span>✓ <span class="text-emerald-400">{{ p.tracks_new }}</span> new</span>
+            <span>↺ <span class="text-zinc-300">{{ p.tracks_skipped }}</span> skipped</span>
+            <span>✗ <span class="{{ 'text-rose-400' if p.tracks_failed else 'text-zinc-500' }}">{{ p.tracks_failed }}</span> failed</span>
+        </div>
+    </div>
+{% endif %}
