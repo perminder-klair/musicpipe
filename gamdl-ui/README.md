@@ -25,9 +25,11 @@ musicpipe-ui container (port 4150)
 ├── shares volumes with gamdl + beets:
 │     ../gamdl/config   → /config     (rw — watchlist + cookies)
 │     ../gamdl/logs     → /gamdl-logs (ro — cron run.log)
-│     /mnt/hdd/navidrome/Incoming  → /downloads
-│     /mnt/hdd/navidrome/Library   → /library
-│     /mnt/hdd/navidrome           → /music  (unified view for hardlink ops)
+│     ${INCOMING_DIR}   → /downloads
+│     ${LIBRARY_DIR}    → /library
+│     ${MUSIC_ROOT}     → /music      (unified view for hardlink ops)
+│     ../beets          → /beets-data (reads .import-status, touches .trigger-import)
+│     ../scripts        → /scripts    (ro — one-shot ops scripts)
 │
 ├── own volume:
 │     ./ui-data → /ui-data          (SQLite DB + UI-triggered run logs)
@@ -35,6 +37,10 @@ musicpipe-ui container (port 4150)
 └── on music-network, talks to:
       http://navidrome:4533  (Subsonic API)
 ```
+
+Host paths (`${INCOMING_DIR}`, `${LIBRARY_DIR}`, `${MUSIC_ROOT}`) are configurable
+in `.env`; they default to children of `/srv/navidrome`. Beets coordination is
+file-based via the `/beets-data` mount — the UI does not talk to a beets HTTP API.
 
 The container has gamdl installed so UI-triggered syncs run here directly
 (subject to a single-run lock). The nightly cron still runs in the sibling

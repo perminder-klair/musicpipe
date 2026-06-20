@@ -1,6 +1,6 @@
-# CLAUDE.md — musicpipe
+# CLAUDE.md
 
-Guidance for Claude Code when working in this repo.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What this is
 
@@ -107,6 +107,19 @@ The **replace-with-hardlink** path needs a unified `/music` mount in
 Skipped runs still record a `runs` row with `status='ok'` and a synthetic
 log file carrying the skip reason, so "view log" on the Runs page works.
 
+### Per-track expansion (flag-gated, `USE_TRACK_EXPANSION=1`)
+
+`expander.py` wraps gamdl's internal `AppleMusicApi` (reusing the same
+`cookies.txt`) to enumerate every track an album/artist/playlist URL would
+produce *before* gamdl runs. `pre_filter.expand_and_filter()` diffs that list
+against the `tracks` table. When the env flag `USE_TRACK_EXPANSION=1` is set,
+`runner._run_one()` takes this path instead of the legacy Phase-C check: it
+either synthetic-skips (nothing missing) or hands gamdl a **per-track URL list**
+covering only the missing tracks — far less re-downloading than re-running the
+whole album/artist URL. On any expander error it logs and falls back to the
+legacy path, so the flag is safe to leave off (the default). Debug endpoints:
+`/expand`, `/expand-filter`, `/resolve-urls`.
+
 ## Services (single docker-compose.yml, single network)
 
 | Service       | Image                       | Port  | Purpose |
@@ -130,9 +143,18 @@ Three pages, all sharing `_nav.html` + `_modals.html` + `_shared_scripts.html`:
 - `/` **Dashboard** — status box, live SSE log, watchlist (add, tabs
   including "Needs attention", per-card ♪ opens tracks modal). No
   service cards, no runs history — those moved to Library and Runs.
-- `/library` **Library** — Navidrome + Beets service cards on top, then
-  counts header + track browser with search/filter and per-row del /
-  del+block / undelete / blocklist actions.
+- `/library` **Library** — Navidrome + Beets service cards on top, then a
+  counts header and a two-tab browser:
+  - **Browse** — artist → album → track drill-down
+    (`/fragments/library/artists` → `/fragments/library/artist` →
+    `/fragments/library/album/{id}`). Album rows carry **redownload**
+    (`/library/album/{id}/redownload`, re-fetches only missing tracks via the
+    runner) and **play** (`/library/album/{id}/play`, 302s into Navidrome).
+    Artist/album-level bulk actions go through `/library/artist/action` and
+    `/library/album/{id}/action`.
+  - **Search** — the original flat track list (`/fragments/library`) with
+    search/filter and per-row del / del+block / undelete / blocklist actions
+    plus a multi-select `/library/bulk`.
 - `/runs` **Runs** — full-width auto-refreshing runs table; each row
   opens the log modal in place.
 
@@ -162,6 +184,14 @@ curl -X POST http://localhost:4150/maintenance/filter-incoming
 
 # Pre-check probe
 curl 'http://localhost:4150/pre-check?url=<url-encoded>&kind=album'
+
+# Per-track expansion debug (needs cookies.txt; see USE_TRACK_EXPANSION)
+curl 'http://localhost:4150/expand?url=<url-encoded>&kind=album'
+curl 'http://localhost:4150/expand-filter?url=<url-encoded>&kind=album'
+
+# Bulk-seed the watchlist from an exported Apple Music library (dry-run first)
+docker exec -w /srv gamdl-ui /opt/venv/bin/python /scripts/import-am-library.py \
+  --tsv /scripts/am-library.tsv --storefront gb --dry-run
 
 # Check cron + TZ in gamdl
 docker exec gamdl cat /etc/cron.d/gamdl  # 0 3 * * *
@@ -212,6 +242,9 @@ docker exec gamdl date                   # Europe/London
 | `.env`                          | Filesystem paths, `PUID`/`PGID`, ports, Navidrome + Last.fm API creds |
 | `scripts/auto-import.sh`        | Beets sidecar loop — curls filter-incoming, runs `beet import`, chowns Library + Incoming |
 | `scripts/{setup,fix_permissions,tag-music,setup_symlinks}.sh` | One-shot ops helpers |
+| `scripts/export-am-library.applescript` | Run on the Mac with the Apple Music library; dumps `artist<TAB>album` per track to a TSV (bulk-watchlist seeding) |
+| `scripts/normalize-am-library.py` | Parses Apple's `Music Library.xml` export → deduped `(album_artist, album)` TSV, filtered to AM catalog tracks |
+| `scripts/import-am-library.py`  | Resolves a TSV of (artist, album) to AM album URLs and appends to the watchlist; run inside `gamdl-ui` (imports `watchlist` + `pre_filter`) |
 | `beets/config.yaml`             | `move: yes`, `incremental: no`, `duplicate_action: keep` (was `remove`, which wiped partially-re-downloaded albums; briefly `merge`, which crashed relocating stale DB entries — `keep` imports new tracks as a separate aunique folder, no wipe/no crash; Navidrome groups by tags) |
 | `beets/state.pickle` / `musiclibrary.blb` | Beets import history (preserve across rebuilds) |
 | `gamdl/Dockerfile`              | Build for the cron downloader (has python3 + wget for pre-check) |
@@ -224,11 +257,12 @@ docker exec gamdl date                   # Europe/London
 | `gamdl-ui/app/main.py`          | FastAPI routes: dashboard, library, runs, filter endpoints, pre-check, library actions |
 | `gamdl-ui/app/store.py`         | SQLite schema + helpers — `meta`, `runs`, `tracks` tables |
 | `gamdl-ui/app/indexer.py`       | mutagen tag reader + `index_incoming/library/all` + `filter_incoming` + `delete_library_file` |
-| `gamdl-ui/app/pre_filter.py`    | `canonical_id` (dedupe), `should_skip`, `should_skip_for_cron` |
-| `gamdl-ui/app/runner.py`        | Subprocess manager — CR-aware stdout parser, pre-filter short-circuit, post-run indexer call |
+| `gamdl-ui/app/pre_filter.py`    | `canonical_id` (dedupe), `should_skip`, `should_skip_for_cron`, `expand_and_filter` (Phase 3) |
+| `gamdl-ui/app/expander.py`      | Wraps gamdl's `AppleMusicApi` to enumerate a URL's tracks before download (per-track expansion, `USE_TRACK_EXPANSION=1`) |
+| `gamdl-ui/app/runner.py`        | Subprocess manager — CR-aware stdout parser, pre-filter short-circuit, flag-gated per-track expansion (`USE_TRACK_EXPANSION`), post-run indexer call |
 | `gamdl-ui/app/watchlist.py`     | Reads/writes `gamdl/config/*.txt`; `DuplicateEntryError` on add |
 | `gamdl-ui/app/beets.py` `navidrome.py` `apple.py` `backfill.py` | External adapters |
-| `gamdl-ui/app/templates/`       | Three full pages (`index.html`, `library.html`, `runs.html`) + shared partials (`_nav`, `_modals`, `_shared_scripts`) + fragments (`_watchlist`, `_library_rows`, `_watchlist_tracks`, `_runs`, `_stats`, `_beets`, `_status`, `_progress`) |
+| `gamdl-ui/app/templates/`       | Three full pages (`index.html`, `library.html`, `runs.html`) + shared partials (`_nav`, `_modals`, `_shared_scripts`) + fragments — flat list (`_library_rows`, `_library_row`), Browse drill-down (`_artists`, `_albums`, `_album_tracks`), plus (`_watchlist`, `_watchlist_tracks`, `_runs`, `_stats`, `_beets`, `_status`, `_progress`) |
 | `gamdl-ui/ui-data/ui.db`        | SQLite — meta + runs + tracks (gitignored) |
 | `gamdl-ui/ui-data/logs/`        | Per-run subprocess logs (gitignored) |
 
