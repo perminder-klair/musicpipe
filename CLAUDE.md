@@ -25,9 +25,8 @@ watchlist URL ──► GET gamdl-ui:/pre-check (skip if complete or fresh-clean
         ▼  auto-import (every 5 min, or instantly on .trigger-import)
      1. POST gamdl-ui:/maintenance/filter-incoming
           - strips blocked + deleted track IDs
-          - strips cross-inode duplicates (re-downloads of Library tracks)
-          - REPLACES with hardlink to the Library twin when possible
-            (preserves gamdl's skip cache, breaks re-download loops)
+          - strips ANY already-held track (by id/ISRC/signature) so beets
+            only ever sees genuinely-new tracks (plain unlink, hardlink-safe)
      2. beet import -q /music/Incoming   (move: yes)
      3. chown -R PUID:PGID /music/Library /music/Incoming
         │
@@ -80,18 +79,29 @@ on a missing file is the only pruning. This preserves `deleted_at` /
 | Condition | Action | Counter |
 |---|---|---|
 | `deleted_at` or `blocklisted` | unlink | `removed_blocked` |
-| has `library_path`, **same inode** as Library twin | **leave alone** | `kept_hardlinks` |
-| has `library_path`, different inode (re-download) | unlink + recreate as hardlink to Library twin | `replaced_with_hardlink` |
-| has `library_path`, different inode, hardlink fails | plain unlink (beets' `duplicate_action: remove` catches it) | `removed_duplicate` |
+| already has a live `library_path` (id / ISRC / signature match) | **plain unlink**, any inode | `removed_duplicate` |
 
-**The inode check is load-bearing.** Pre-Phase-D legacy hardlinks share
-inodes with their Library twins; they cost nothing on disk and serve as
-gamdl's built-in skip cache. Stripping them would force re-downloads on
-the next cron for every artist/playlist URL.
+**Always plain-unlink an already-held track — never leave or re-hardlink
+it.** beets runs `move: yes`, so ANY file left in Incoming that duplicates
+a Library track (a fresh re-download *or* a hardlink to the Library twin)
+gets re-imported into a new `%aunique{}` (`[NNNN]`) folder. Same inode =
+no extra disk, but Navidrome still indexes it as a distinct `media_file`
+with a distinct Subsonic id — the duplicate-song bug (issue #1).
 
-The **replace-with-hardlink** path needs a unified `/music` mount in
-`gamdl-ui` so `os.link()` doesn't hit `EXDEV` across the separate
-`/downloads` and `/library` bind mounts.
+> **History (issue #1):** filter_incoming used to *replace* re-downloads
+> with a hardlink to the Library twin (and leave same-inode files alone),
+> banking on beets' `incremental` flag to skip the already-imported dir.
+> But `incremental: no` was set later to fix the treadmill, silently
+> breaking that assumption — so the filter was manufacturing ~1,950
+> `[NNNN]` duplicate folders it was meant to prevent. The skip-cache these
+> hardlinks provided is obsolete anyway: with `USE_TRACK_EXPANSION=1`
+> gamdl is handed only missing tracks (the tracks DB is the skip oracle),
+> so nothing already-held reaches Incoming to begin with. One-off cleanup
+> lives in `scripts/dedupe_library.py`.
+
+The `/music` unified mount is now vestigial for this path (the removed
+`replaced_with_hardlink` branch used `os.link()` across mounts); it's kept
+for any future cross-mount op but filter_incoming no longer needs it.
 
 ## Pre-check (don't invoke gamdl when you don't need to)
 
@@ -183,13 +193,12 @@ docker exec gamdl date                   # Europe/London
   gamdl directly at the Library; the Beets sidecar produces the
   canonical Library layout. Since Phase D the sidecar uses `move: yes`
   (previously `hardlink: yes`), so new imports empty Incoming.
-- **Don't strip same-inode Incoming files.** They're legacy pre-Phase-D
-  hardlinks sharing inodes with their Library twin. Zero disk cost,
-  serve as gamdl's skip cache. The filter's inode check preserves them.
-- **gamdl-ui needs the `/music` unified mount** for hardlink ops in
-  `filter_incoming`. Separate `/downloads` + `/library` mounts are also
-  present for the other code paths; removing `/music` regresses the
-  replace-with-hardlink path to `EXDEV`.
+- **filter_incoming strips ALL already-held Incoming files, including
+  same-inode hardlinks.** Under `move: yes` a leftover hardlink would be
+  re-imported by beets into a new `[NNNN]` folder → a distinct Navidrome
+  entry (issue #1). Unlinking a hardlink is safe: it only drops that
+  directory entry, the Library twin survives. gamdl's skip cache is the
+  tracks DB (via `USE_TRACK_EXPANSION`), not Incoming hardlinks.
 - **`/mnt/sata/navidrome/{Incoming,Library,NavidromeData}` is shared
   state**, not project-local. Compose references these via
   `${INCOMING_DIR}`, `${LIBRARY_DIR}`, `${NAVIDROME_DATA}`, `${MUSIC_ROOT}`

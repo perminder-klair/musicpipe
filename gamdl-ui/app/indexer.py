@@ -352,21 +352,34 @@ class LibraryIndex:
 
 
 def filter_incoming() -> dict:
-    """Remove Incoming files that shouldn't reach beets.
+    """Reduce Incoming to only tracks that aren't already held, before beets.
 
     Two reasons a file gets unlinked:
 
     - **blocked**: am_track_id is soft-deleted or blocklisted. The decision
       is durable — the row keeps its deleted_at/blocklisted flag so any
       future re-download gets caught here again.
-    - **duplicate**: am_track_id already has a library_path *and* the
-      Incoming copy is a genuinely different inode from the Library file.
-      That pattern means gamdl re-downloaded a track we already hold;
-      unlinking beats letting beets match + duplicate_action: remove it.
+    - **duplicate**: the track (by am_track_id, ISRC, or normalized
+      (album, title)) already has a live Library file. gamdl re-downloaded
+      something we already hold; the Incoming copy must not reach beets.
 
-    Legacy hardlinks (Incoming and Library sharing the same inode, a relic
-    of the pre-Phase-D ``hardlink: yes`` era) are left alone — they cost no
-    disk and serve as gamdl's built-in skip cache.
+    We **always plain-unlink** a duplicate, regardless of inode. Unlinking
+    a hardlink only drops that directory entry — the Library file survives
+    via its own entry. This is deliberate and load-bearing:
+
+    - beets runs ``move: yes`` + ``duplicate_action`` on Incoming. ANY file
+      left in Incoming that duplicates a Library track — a fresh re-download
+      OR a hardlink to the Library twin — gets re-imported into a new
+      ``%aunique{}`` (``[NNNN]``) album folder. Same inode means no extra
+      disk, but Navidrome still indexes it as a distinct media_file with a
+      distinct Subsonic id (the duplicate-song bug). So there is no safe
+      "leave the hardlink" case here.
+    - The old ``replaced_with_hardlink`` / ``kept_hardlinks`` branches
+      existed to keep an Incoming skip-cache for gamdl. That is obsolete:
+      with ``USE_TRACK_EXPANSION=1`` gamdl is handed only missing tracks
+      (the tracks DB is the skip oracle now), so nothing already-held is
+      re-downloaded in the first place, and the hardlink bought nothing but
+      duplicate folders.
 
     Invoked by auto-import.sh before every ``beet import``. Prunes empty
     parent dirs so beets doesn't re-enter them on the next cycle.
@@ -380,10 +393,8 @@ def filter_incoming() -> dict:
         "scanned": 0,
         "removed_blocked": 0,
         "removed_duplicate": 0,
-        "replaced_with_hardlink": 0,
         "matched_by_isrc": 0,
         "matched_by_signature": 0,
-        "kept_hardlinks": 0,
         "pruned_dirs": 0,
         "errors": 0,
     }
@@ -410,30 +421,9 @@ def filter_incoming() -> dict:
             result["matched_by_signature"] += 1
         lib_p = m.library_path
         if lib_p is not None:
-            if _same_inode(path, Path(lib_p)):
-                # Same-inode hardlink → cost-free skip cache, leave alone.
-                result["kept_hardlinks"] += 1
-                continue
-            # Different inode: gamdl re-downloaded a track we already
-            # have. Unlinking alone would cause a re-download-and-strip
-            # loop on every cron run. Replace with a hardlink to the
-            # Library copy so the next gamdl invocation sees the file
-            # exists and skips, AND beets' incremental flag treats the
-            # dir as already-imported.
-            u_inc = _to_unified(path)
-            u_lib = _to_unified(Path(lib_p))
-            try:
-                path.unlink()
-                u_inc.parent.mkdir(parents=True, exist_ok=True)
-                os.link(str(u_lib), str(u_inc))
-                result["replaced_with_hardlink"] += 1
-                continue
-            except OSError:
-                # Either the re-hardlink failed (cross-device, perms)
-                # or the Library twin vanished between our DB read and
-                # now. Fall through to plain removal — beets will
-                # catch it via duplicate_action: remove.
-                result["errors"] += 1
+            # Already held in Library. Plain-unlink so beets never sees it —
+            # even a same-inode hardlink would otherwise be re-imported into
+            # a new [NNNN] folder under move:yes. See docstring.
             try:
                 path.unlink()
                 result["removed_duplicate"] += 1
