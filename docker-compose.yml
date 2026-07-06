@@ -119,6 +119,10 @@ services:
       USE_TRACK_EXPANSION: ${USE_TRACK_EXPANSION:-0}
       INDEXER_INTERVAL: ${INDEXER_INTERVAL:-120}
       RUNNER_INACTIVITY_TIMEOUT: ${RUNNER_INACTIVITY_TIMEOUT:-900}
+      # Daily ui.db + beets-DB backups into ./gamdl-ui/ui-data/backups
+      BACKUP_INTERVAL: ${BACKUP_INTERVAL:-86400}
+      BACKUP_KEEP: ${BACKUP_KEEP:-7}
+      RUN_LOG_RETENTION_DAYS: ${RUN_LOG_RETENTION_DAYS:-60}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4150/healthz"]
       interval: 30s

@@ -190,6 +190,11 @@ touch beets/.trigger-import
 # Force a full indexer sweep (idempotent)
 curl -X POST http://localhost:4150/maintenance/reindex
 
+# On-demand DB backup (ui.db + beets DB → gamdl-ui/ui-data/backups/, keeps
+# newest BACKUP_KEEP=7; also prunes per-run logs older than 60 days). The
+# same pass runs daily via the maintenance loop.
+curl -X POST http://localhost:4150/maintenance/backup
+
 # Preview what filter-incoming would do
 curl -X POST http://localhost:4150/maintenance/filter-incoming
 
@@ -260,6 +265,12 @@ docker exec gamdl date                   # Europe/London
   tag a truncated m4a forever. `beet import` also runs under
   `timeout ${BEET_TIMEOUT:-3600}` so a hung network plugin (fetchart /
   discogs) can't wedge the loop.
+- **Logs rotate by size, between writes only.** `gamdl/run.sh` rotates
+  `run.log` (20 MB, keep 3) at the start of each cron run; `auto-import.sh`
+  rotates `auto-import.log` + `beet.log` (10 MB, keep 3) at the top of each
+  idle tick. Everything appends via `>>`/`tee -a`, so no writer holds a
+  handle across the `mv` — don't move rotation to a point where gamdl or
+  beets is mid-run.
 
 ## File reference
 
@@ -289,6 +300,7 @@ docker exec gamdl date                   # Europe/London
 | `gamdl-ui/app/runner.py`        | Subprocess manager — CR-aware stdout parser, pre-filter short-circuit, flag-gated per-track expansion (`USE_TRACK_EXPANSION`), post-run indexer call |
 | `gamdl-ui/app/watchlist.py`     | Reads/writes `gamdl/config/*.txt`; `DuplicateEntryError` on add |
 | `gamdl-ui/app/beets.py` `navidrome.py` `apple.py` `backfill.py` | External adapters |
+| `gamdl-ui/app/backup.py`        | Daily maintenance: sqlite-API snapshots of ui.db + beets DB into `ui-data/backups/` (newest `BACKUP_KEEP`), per-run log pruning (`RUN_LOG_RETENTION_DAYS`). Same-disk — protects against app bugs/corruption, not drive failure |
 | `gamdl-ui/app/templates/`       | Three full pages (`index.html`, `library.html`, `runs.html`) + shared partials (`_nav`, `_modals`, `_shared_scripts`) + fragments — flat list (`_library_rows`, `_library_row`), Browse drill-down (`_artists`, `_albums`, `_album_tracks`), plus (`_watchlist`, `_watchlist_tracks`, `_runs`, `_stats`, `_beets`, `_status`, `_progress`) |
 | `gamdl-ui/ui-data/ui.db`        | SQLite — meta + runs + tracks (gitignored) |
 | `gamdl-ui/ui-data/logs/`        | Per-run subprocess logs (gitignored) |

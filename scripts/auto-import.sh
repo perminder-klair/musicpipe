@@ -14,12 +14,33 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $1" | tee -a "$LOG"
 }
 
+# Size-based rotation, keeping N archives (file.1 newest … file.N oldest).
+# Called at the top of each idle loop tick — nothing is importing then, so
+# neither this script's tee -a nor beets' own log has a writer mid-mv.
+rotate_log() {
+    local file=$1 max_bytes=${2:-10485760} keep=${3:-3}
+    [ -f "$file" ] || return 0
+    local size
+    size=$(stat -c %s "$file" 2>/dev/null || stat -f %z "$file" 2>/dev/null) || return 0
+    [ "$size" -gt "$max_bytes" ] || return 0
+    local i=$keep prev
+    while [ "$i" -gt 1 ]; do
+        prev=$((i - 1))
+        [ -f "$file.$prev" ] && mv -f "$file.$prev" "$file.$i"
+        i=$prev
+    done
+    mv -f "$file" "$file.1"
+}
+
 # find(1) predicate for audio files, shared by the counters below.
 audio_pred=( \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.wav" -o -name "*.opus" -o -name "*.wma" -o -name "*.aac" \) )
 
 log "Auto-import started (checking every ${INTERVAL}s)"
 
 while true; do
+    rotate_log "$LOG"
+    rotate_log /config/beet.log
+
     # Count music files in incoming
     COUNT=$(find -L "$INCOMING" -type f "${audio_pred[@]}" 2>/dev/null | wc -l)
     # gamdl copies finished files in from its container-local temp dir — not

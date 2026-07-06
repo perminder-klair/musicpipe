@@ -13,10 +13,10 @@ gamdl/config/playlists.txt
 # beets Discogs API token (create your own via `beet discogs`)
 beets/discogs_token.json
 
-# Runtime logs
+# Runtime logs (including rotated .1/.2/.3 archives)
 gamdl/logs/
-beets/auto-import.log
-beets/beet.log
+beets/auto-import.log*
+beets/beet.log*
 
 # beets runtime state
 beets/state.pickle

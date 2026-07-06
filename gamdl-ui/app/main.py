@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import apple, backfill, beets, expander, indexer, navidrome, pre_filter, runner, store, watchlist
+from . import apple, backfill, backup, beets, expander, indexer, navidrome, pre_filter, runner, store, watchlist
 
 BASE_DIR = Path(__file__).parent
 GAMDL_LOGS_DIR = Path(os.environ.get("GAMDL_LOGS_DIR", "/gamdl-logs"))
@@ -68,10 +68,12 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 
 
 INDEXER_INTERVAL = int(os.environ.get("INDEXER_INTERVAL", "120"))
+BACKUP_INTERVAL = int(os.environ.get("BACKUP_INTERVAL", "86400"))
 
-# Module-held reference: a task created without one is eligible for GC
+# Module-held references: a task created without one is eligible for GC
 # mid-run (asyncio only keeps weak references to tasks).
 _indexer_task: asyncio.Task | None = None
+_maintenance_task: asyncio.Task | None = None
 
 
 async def _indexer_loop() -> None:
@@ -88,6 +90,21 @@ async def _indexer_loop() -> None:
         await asyncio.sleep(INDEXER_INTERVAL)
 
 
+async def _maintenance_loop() -> None:
+    """Daily DB backup + run-log pruning. Checks hourly against the newest
+    backup dir's age rather than sleeping BACKUP_INTERVAL flat, so container
+    restarts neither pile up extra backups nor reset the schedule."""
+    while True:
+        try:
+            age = backup.seconds_since_last_backup()
+            if age is None or age >= BACKUP_INTERVAL:
+                stats = await asyncio.to_thread(backup.run_maintenance)
+                print(f"[maintenance] {stats}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[maintenance] failed: {exc!r}", flush=True)
+        await asyncio.sleep(3600)
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     store.init_db()
@@ -99,16 +116,23 @@ async def _startup() -> None:
         print(f"[startup] backfill: {result}", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"[startup] backfill failed: {exc!r}", flush=True)
-    # Kick off the tracks-table indexer. Reference kept at module level so
-    # the task can't be garbage-collected mid-loop; uvicorn cancels it on
-    # shutdown via the default task-group teardown.
-    global _indexer_task
+    # Kick off the tracks-table indexer + daily maintenance. References kept
+    # at module level so the tasks can't be garbage-collected mid-loop;
+    # uvicorn cancels them on shutdown via the default task-group teardown.
+    global _indexer_task, _maintenance_task
     _indexer_task = asyncio.create_task(_indexer_loop())
+    _maintenance_task = asyncio.create_task(_maintenance_loop())
 
 
 @app.post("/maintenance/backfill")
 async def maintenance_backfill() -> JSONResponse:
     return JSONResponse(backfill.run())
+
+
+@app.post("/maintenance/backup")
+async def maintenance_backup() -> JSONResponse:
+    """On-demand DB backup + run-log prune (same pass the daily loop runs)."""
+    return JSONResponse(await asyncio.to_thread(backup.run_maintenance))
 
 
 @app.get("/pre-check")

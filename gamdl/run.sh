@@ -21,6 +21,26 @@ mkdir -p "$TEMPDIR"
 ts()  { date '+%Y-%m-%d %H:%M:%S %Z'; }
 log() { echo "[$(ts)] $*" | tee -a "$LOG" >&2; }
 
+# Size-based rotation, keeping N archives (file.1 newest … file.N oldest).
+# Safe to call only between runs — everything appends via >>/tee -a, so
+# nothing holds an open handle across the mv.
+rotate_log() {
+    local file=$1 max_bytes=${2:-20971520} keep=${3:-3}
+    [ -f "$file" ] || return 0
+    local size
+    size=$(stat -c %s "$file" 2>/dev/null || stat -f %z "$file" 2>/dev/null) || return 0
+    [ "$size" -gt "$max_bytes" ] || return 0
+    local i=$keep prev
+    while [ "$i" -gt 1 ]; do
+        prev=$((i - 1))
+        [ -f "$file.$prev" ] && mv -f "$file.$prev" "$file.$i"
+        i=$prev
+    done
+    mv -f "$file" "$file.1"
+}
+
+rotate_log "$LOG" "${RUN_LOG_MAX_BYTES:-20971520}" 3
+
 if [ ! -s "$COOKIES" ]; then
     log "ERROR: cookies file missing or empty at $COOKIES"
     exit 1
