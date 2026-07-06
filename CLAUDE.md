@@ -79,7 +79,8 @@ on a missing file is the only pruning. This preserves `deleted_at` /
 | Condition | Action | Counter |
 |---|---|---|
 | `deleted_at` or `blocklisted` | unlink | `removed_blocked` |
-| already has a live `library_path` (id / ISRC / signature match) | **plain unlink**, any inode | `removed_duplicate` |
+| already has a live `library_path` (id / ISRC / signature match) **and that file still exists on disk** | **plain unlink**, any inode | `removed_duplicate` |
+| DB claims a Library copy but the file is gone (stale index) | keep — it's the only copy | `stale_library_refs` |
 
 **Always plain-unlink an already-held track — never leave or re-hardlink
 it.** beets runs `move: yes`, so ANY file left in Incoming that duplicates
@@ -237,11 +238,28 @@ docker exec gamdl date                   # Europe/London
   trigger downloads + can unlink Library files). Not exposed via the
   Cloudflare Tunnel.
 - **Runner parses stdout split on `\r`**, not just `\n`. yt-dlp emits
-  progress frames without newlines, so a single `readline()` chunk can
-  contain many progress frames plus the next `[Track N/TOTAL] Downloading`
-  announcement glued to the tail. Not splitting on `\r` caused the track
-  counter to miss every actual download (only skipped tracks got clean
-  standalone lines).
+  progress frames without newlines, so chunks can contain many progress
+  frames plus the next `[Track N/TOTAL] Downloading` announcement glued to
+  the tail. Not splitting on `\r` caused the track counter to miss every
+  actual download (only skipped tracks got clean standalone lines). The
+  reader is chunk-based (`stdout.read`, own `[\r\n]` splitting), which also
+  makes the inactivity watchdog accurate: `RUNNER_INACTIVITY_TIMEOUT`
+  (default 900s) of true silence kills the gamdl **process group**
+  (`start_new_session=True`, so yt-dlp/ffmpeg children die too) instead of
+  a hung run holding the runner reservation forever.
+- **Library wipe-guard**: `index_library()` refuses to mass-clear
+  `library_path` when a sweep sees fewer than half the tracks the DB holds
+  (min 10 rows). Without it, an unmounted/half-mounted Library looked like
+  "everything was deleted", nulled every `library_path`, and the next
+  track-expansion run re-downloaded the entire library. Deliberate deletes
+  go through the UI (which clears paths in the DB immediately), so a
+  legitimate sweep never trips it; the stats dict carries `guard_tripped`.
+- **auto-import waits for Incoming to settle** (any audio file with mtime
+  <1 min defers the cycle) because gamdl's temp→Incoming move is a
+  cross-filesystem copy, not an atomic rename — importing mid-copy would
+  tag a truncated m4a forever. `beet import` also runs under
+  `timeout ${BEET_TIMEOUT:-3600}` so a hung network plugin (fetchart /
+  discogs) can't wedge the loop.
 
 ## File reference
 

@@ -179,23 +179,33 @@ async def fetch_tracks(url: str, kind: str) -> list[TrackRef]:
     """Expand a watchlist URL to its constituent catalog tracks.
 
     Raises on URL-parse failures (caller treats these as unexpandable and
-    falls through to passing the URL straight to gamdl). Raises on API
-    failures too — we prefer a loud failure that flips back to the
-    legacy path over a silent zero-results skip.
+    falls through to passing the URL straight to gamdl). On an API failure
+    the cached client is dropped and the call retried once — the scraped
+    dev token expires after hours, and without the retry a long-lived
+    process would fail every expansion (falling back to legacy full
+    re-runs) until restart. A second failure propagates loudly.
     """
     if kind == "album":
         aid = pre_filter.album_id_from_url(url)
         if not aid:
             raise ValueError(f"could not parse album id from {url}")
-        return await _expand_album(aid)
-    if kind == "playlist":
-        pid = pre_filter.playlist_id_from_url(url)
-        if not pid:
+        expand = _expand_album
+    elif kind == "playlist":
+        aid = pre_filter.playlist_id_from_url(url)
+        if not aid:
             raise ValueError(f"could not parse playlist id from {url}")
-        return await _expand_playlist(pid)
-    if kind == "artist":
+        expand = _expand_playlist
+    elif kind == "artist":
         aid = pre_filter.artist_id_from_url(url)
         if not aid:
             raise ValueError(f"could not parse artist id from {url}")
-        return await _expand_artist(aid)
-    raise ValueError(f"unknown kind: {kind}")
+        expand = _expand_artist
+    else:
+        raise ValueError(f"unknown kind: {kind}")
+
+    try:
+        return await expand(aid)
+    except Exception as e:  # noqa: BLE001
+        log.warning("expansion of %s failed (%s); resetting API client and retrying", url, e)
+        await reset()
+        return await expand(aid)

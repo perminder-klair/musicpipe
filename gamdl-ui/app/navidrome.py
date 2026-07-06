@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -37,14 +38,25 @@ class ScanStatus:
     count: int
 
 
+# One client for the process — connection reuse instead of a TCP + client
+# setup per Subsonic call (the stats fragment polls these endpoints).
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(timeout=10.0)
+    return _client
+
+
 async def _get(path: str, params: dict | None = None) -> dict:
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get(
-            f"{NAVIDROME_URL}/rest/{path}",
-            params={**_auth_params(), **(params or {})},
-        )
-        r.raise_for_status()
-        return r.json().get("subsonic-response", {})
+    r = await _get_client().get(
+        f"{NAVIDROME_URL}/rest/{path}",
+        params={**_auth_params(), **(params or {})},
+    )
+    r.raise_for_status()
+    return r.json().get("subsonic-response", {})
 
 
 async def trigger_scan(full: bool = False) -> ScanStatus:
@@ -59,6 +71,12 @@ async def scan_status() -> ScanStatus:
     return ScanStatus(scanning=bool(info.get("scanning")), count=int(info.get("count", 0)))
 
 
+# library_stats paginates the entire album list; the stats fragment polls it,
+# so cache the totals briefly rather than re-walking every album per poll.
+_STATS_TTL_SEC = 120
+_stats_cache: tuple[float, dict] | None = None
+
+
 async def library_stats() -> dict:
     """Return Artists/Albums/Songs totals for the Navidrome card.
 
@@ -66,6 +84,10 @@ async def library_stats() -> dict:
     until a short page comes back — otherwise a library > 500 albums
     silently reports 500. Song total is free from ``getScanStatus.count``.
     """
+    global _stats_cache
+    if _stats_cache is not None and time.time() - _stats_cache[0] < _STATS_TTL_SEC:
+        return dict(_stats_cache[1])
+
     resp = await _get("getArtists")
     artists_index = resp.get("artists", {}).get("index", [])
     artist_count = sum(len(bucket.get("artist", [])) for bucket in artists_index)
@@ -84,10 +106,12 @@ async def library_stats() -> dict:
             break
         offset += page_size
 
-    return {
+    stats = {
         "artists": artist_count,
         "albums": album_count,
     }
+    _stats_cache = (time.time(), stats)
+    return dict(stats)
 
 
 async def artist_tracks(artist_name: str) -> int:

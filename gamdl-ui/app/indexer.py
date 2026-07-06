@@ -162,6 +162,63 @@ def _iter_audio_files(root: Path):
             yield p
 
 
+# path → (mtime, size, TrackTags | None). Steady-state sweeps skip the
+# mutagen atom parse for any file whose stat is unchanged — turning the
+# every-2-minutes sweep from "re-read every m4a" into "stat every m4a".
+# Process-local by design: the first sweep after a restart re-reads
+# everything, which doubles as the startup backfill. None is cached too so
+# a broken file isn't re-parsed every sweep.
+_tag_cache: dict[str, tuple[float, int, TrackTags | None]] = {}
+
+
+def _read_tags_cached(path: Path) -> tuple[TrackTags | None, float] | None:
+    """Stat + read tags via the mtime/size cache. Returns (tags, mtime), or
+    None if the file vanished between the walk and the stat."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    key = str(path)
+    cached = _tag_cache.get(key)
+    if cached is not None and cached[0] == st.st_mtime and cached[1] == st.st_size:
+        return cached[2], st.st_mtime
+    tags = read_tags(path)
+    _tag_cache[key] = (st.st_mtime, st.st_size, tags)
+    return tags, st.st_mtime
+
+
+def _prune_tag_cache(root: Path, seen_paths: set[str]) -> None:
+    """Drop cache entries under ``root`` whose file wasn't seen this sweep."""
+    prefix = str(root).rstrip("/") + "/"
+    for key in [k for k in _tag_cache if k.startswith(prefix) and k not in seen_paths]:
+        del _tag_cache[key]
+
+
+def _walk_and_read(root: Path) -> tuple[list[tuple[TrackTags, str, float]], int, int]:
+    """Phase 1 of a sweep: walk + read tags, no DB writes.
+
+    Keeping the slow filesystem pass out of the write transaction means the
+    batched commit in phase 2 holds the DB lock for milliseconds, not for
+    the duration of a disk walk. Returns (rows, scanned, unreadable)."""
+    rows: list[tuple[TrackTags, str, float]] = []
+    scanned = 0
+    unreadable = 0
+    seen_paths: set[str] = set()
+    for path in _iter_audio_files(root):
+        scanned += 1
+        seen_paths.add(str(path))
+        got = _read_tags_cached(path)
+        if got is None:
+            continue
+        tags, mtime = got
+        if tags is None:
+            unreadable += 1
+            continue
+        rows.append((tags, str(path), mtime))
+    _prune_tag_cache(root, seen_paths)
+    return rows, scanned, unreadable
+
+
 def index_incoming(source_url: str | None = None) -> dict:
     """Walk Incoming, upsert download rows. Returns a small stat dict.
 
@@ -169,86 +226,90 @@ def index_incoming(source_url: str | None = None) -> dict:
     watchlist URL when you know it (UI-triggered run); leave None for periodic
     sweeps that can't attribute each file to a single URL.
     """
-    scanned = 0
-    upserted = 0
-    unreadable = 0
-    seen_ids: set[str] = set()
-    for path in _iter_audio_files(INCOMING_DIR):
-        scanned += 1
-        tags = read_tags(path)
-        if tags is None:
-            unreadable += 1
-            continue
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        store.upsert_track_incoming(
-            am_track_id=tags.am_track_id,
-            am_album_id=tags.am_album_id,
-            title=tags.title,
-            artist=tags.artist,
-            album=tags.album,
-            album_artist=tags.album_artist,
-            isrc=tags.isrc,
-            mb_track_id=tags.mb_track_id,
-            mb_album_id=tags.mb_album_id,
-            genre=tags.genre,
-            incoming_path=str(path),
-            downloaded_at=mtime,
-            source_url=source_url,
-        )
-        seen_ids.add(tags.am_track_id)
-        upserted += 1
-    cleared = store.clear_incoming_path_if_missing(seen_ids)
+    rows, scanned, unreadable = _walk_and_read(INCOMING_DIR)
+    seen_ids = {tags.am_track_id for tags, _, _ in rows}
+    with store.sweep_transaction() as conn:
+        for tags, path_str, mtime in rows:
+            store.upsert_track_incoming(
+                am_track_id=tags.am_track_id,
+                am_album_id=tags.am_album_id,
+                title=tags.title,
+                artist=tags.artist,
+                album=tags.album,
+                album_artist=tags.album_artist,
+                isrc=tags.isrc,
+                mb_track_id=tags.mb_track_id,
+                mb_album_id=tags.mb_album_id,
+                genre=tags.genre,
+                incoming_path=path_str,
+                downloaded_at=mtime,
+                source_url=source_url,
+                conn=conn,
+            )
+        # No wipe guard here: Incoming legitimately drains to zero after
+        # every beets import, and incoming_path isn't the state of record
+        # for holdings — a wrongly-cleared path is re-set next sweep.
+        cleared = store.clear_incoming_path_if_missing(seen_ids, conn=conn)
     return {
         "location": "incoming",
         "scanned": scanned,
-        "upserted": upserted,
+        "upserted": len(rows),
         "unreadable": unreadable,
         "stale_cleared": cleared,
     }
 
 
+# Library-wipe guard: refuse to mass-clear library_path when the sweep saw
+# suspiciously few files vs what the DB holds. An unmounted/half-mounted
+# Library otherwise looks like "everything was deleted", nulls every
+# library_path, and the next track-expansion run re-downloads the entire
+# library. Deliberate deletes go through the UI (which clears paths in the
+# DB immediately), so a legitimate sweep never sees a >50% surprise drop.
+_LIBRARY_GUARD_MIN_ROWS = 10
+
+
 def index_library() -> dict:
     """Walk Library, upsert import rows. Returns a small stat dict."""
-    scanned = 0
-    upserted = 0
-    unreadable = 0
-    seen_ids: set[str] = set()
-    for path in _iter_audio_files(LIBRARY_DIR):
-        scanned += 1
-        tags = read_tags(path)
-        if tags is None:
-            unreadable += 1
-            continue
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        store.upsert_track_library(
-            am_track_id=tags.am_track_id,
-            am_album_id=tags.am_album_id,
-            title=tags.title,
-            artist=tags.artist,
-            album=tags.album,
-            album_artist=tags.album_artist,
-            isrc=tags.isrc,
-            mb_track_id=tags.mb_track_id,
-            mb_album_id=tags.mb_album_id,
-            genre=tags.genre,
-            library_path=str(path),
-            imported_at=mtime,
-        )
-        seen_ids.add(tags.am_track_id)
-        upserted += 1
-    cleared = store.clear_library_path_if_missing(seen_ids)
+    rows, scanned, unreadable = _walk_and_read(LIBRARY_DIR)
+    seen_ids = {tags.am_track_id for tags, _, _ in rows}
+    db_count = store.count_library_rows()
+    guard_tripped = (
+        db_count >= _LIBRARY_GUARD_MIN_ROWS and len(seen_ids) < db_count / 2
+    )
+    with store.sweep_transaction() as conn:
+        for tags, path_str, mtime in rows:
+            store.upsert_track_library(
+                am_track_id=tags.am_track_id,
+                am_album_id=tags.am_album_id,
+                title=tags.title,
+                artist=tags.artist,
+                album=tags.album,
+                album_artist=tags.album_artist,
+                isrc=tags.isrc,
+                mb_track_id=tags.mb_track_id,
+                mb_album_id=tags.mb_album_id,
+                genre=tags.genre,
+                library_path=path_str,
+                imported_at=mtime,
+                conn=conn,
+            )
+        if guard_tripped:
+            cleared = 0
+            print(
+                f"[indexer] LIBRARY GUARD: sweep saw {len(seen_ids)} tracks but DB "
+                f"holds {db_count} — mount missing or mass external delete? "
+                "Skipping library_path clearing this sweep.",
+                flush=True,
+            )
+        else:
+            cleared = store.clear_library_path_if_missing(seen_ids, conn=conn)
     return {
         "location": "library",
         "scanned": scanned,
-        "upserted": upserted,
+        "upserted": len(rows),
         "unreadable": unreadable,
         "stale_cleared": cleared,
+        "guard_tripped": guard_tripped,
     }
 
 
@@ -395,6 +456,7 @@ def filter_incoming() -> dict:
         "removed_duplicate": 0,
         "matched_by_isrc": 0,
         "matched_by_signature": 0,
+        "stale_library_refs": 0,
         "pruned_dirs": 0,
         "errors": 0,
     }
@@ -421,6 +483,13 @@ def filter_incoming() -> dict:
             result["matched_by_signature"] += 1
         lib_p = m.library_path
         if lib_p is not None:
+            if not os.path.exists(lib_p):
+                # The DB claims a Library copy but the file is gone — stale
+                # index (manual delete the sweep hasn't caught up with).
+                # This Incoming file is the only copy we have; keep it for
+                # beets rather than destroying a legitimate re-download.
+                result["stale_library_refs"] += 1
+                continue
             # Already held in Library. Plain-unlink so beets never sees it —
             # even a same-inode hardlink would otherwise be re-imported into
             # a new [NNNN] folder under move:yes. See docstring.

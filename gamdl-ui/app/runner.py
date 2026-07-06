@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import signal
 import sys
 import time
 import traceback
@@ -43,21 +44,37 @@ DOWNLOAD_LINE_RE = re.compile(
     r"(?:.*?\(frag\s+(?P<fi>\d+)/(?P<ft>\d+)\))?"
 )
 UI_NOISE_RE = re.compile(r"^\s*\[download\]\s+\d")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 BUFFER_MAX = 2000
 
+# Watchdog: kill gamdl if it produces NO stdout for this long. The reader is
+# chunk-based (not line-based), so yt-dlp's newline-less \r progress frames
+# count as output — a healthy download, however slow, never trips this; only
+# a genuinely wedged subprocess does. Without it a hung gamdl held the runner
+# reservation forever and every future sync 409'd until a container restart.
+INACTIVITY_TIMEOUT = int(os.environ.get("RUNNER_INACTIVITY_TIMEOUT", "900"))
 
-_lock = asyncio.Lock()
+
 _seq: int = 0
 _buffer: "deque[tuple[int, str]]" = deque(maxlen=BUFFER_MAX)
 _new_line: asyncio.Event = asyncio.Event()
 
 _running: dict = {"run_id": None, "url": None, "kind": None}
 
-# Cancellation: ``request_cancel()`` sets the flag and terminates the live
-# gamdl subprocess. ``run_all`` checks the flag between entries so a cancel
-# stops the whole sweep, not just the current URL. ``_current_proc`` holds the
-# active subprocess so the cancel path can signal it directly.
+# The live run task. Module-held for three reasons: (1) ``start``/``start_all``
+# do a synchronous check-and-set on it, so two requests in the same event-loop
+# tick can't both launch (the old is_running() flag was only set once the task
+# body ran — a race window); (2) a bare create_task result is eligible for GC
+# mid-run; (3) the done-callback surfaces exceptions that fire-and-forget
+# tasks would swallow silently.
+_active_task: "asyncio.Task | None" = None
+
+# Cancellation: ``request_cancel()`` sets the flag and signals the live
+# gamdl process group. ``start_all``'s sweep checks the flag between entries
+# so a cancel stops the whole sweep, not just the current URL.
+# ``_current_proc`` holds the active subprocess so the cancel path can signal
+# it directly.
 _cancel_requested: bool = False
 _current_proc: "asyncio.subprocess.Process | None" = None
 
@@ -78,19 +95,45 @@ _current_frag_high: int = -1
 
 
 def is_running() -> bool:
-    return _running["run_id"] is not None
+    return _active_task is not None and not _active_task.done()
 
 
 def cancel_requested() -> bool:
     return _cancel_requested
 
 
+def _signal_group(proc: "asyncio.subprocess.Process", sig: int) -> None:
+    """Signal gamdl's whole process group — yt-dlp/ffmpeg children included.
+
+    gamdl is started with ``start_new_session=True`` so it leads its own
+    group; signalling only the leader could leave a child ffmpeg downloading
+    on. Falls back to signalling the leader alone if the group is gone."""
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.send_signal(sig)
+        except ProcessLookupError:
+            pass
+
+
+async def _kill_proc_group(proc: "asyncio.subprocess.Process") -> None:
+    """TERM the group, escalate to KILL if it hasn't exited in 10s."""
+    _signal_group(proc, signal.SIGTERM)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=10.0)
+    except asyncio.TimeoutError:
+        _signal_group(proc, signal.SIGKILL)
+        await proc.wait()
+
+
 def request_cancel() -> bool:
     """Stop the active run and (if a sweep) prevent further entries.
 
-    Sets ``_cancel_requested`` so ``run_all`` breaks after the current entry,
-    and terminates the live gamdl subprocess so the current download stops
-    promptly. Returns True if a run was active to cancel.
+    Sets ``_cancel_requested`` so the sweep breaks after the current entry,
+    and TERMs the live gamdl process group so the current download stops
+    promptly (the read loop sees EOF and its kill-escalation path finishes
+    the job if TERM is ignored). Returns True if a run was active to cancel.
     """
     global _cancel_requested
     if not is_running():
@@ -98,10 +141,7 @@ def request_cancel() -> bool:
     _cancel_requested = True
     proc = _current_proc
     if proc is not None and proc.returncode is None:
-        try:
-            proc.terminate()
-        except ProcessLookupError:
-            pass
+        _signal_group(proc, signal.SIGTERM)
     _append_line("[runner] cancellation requested — stopping")
     return True
 
@@ -272,99 +312,120 @@ async def _run_one(url: str, kind: str, trigger: str = "manual") -> int:
         args.append(url)
         _append_line(f"[runner] starting: {' '.join(args[:-1])} <url>")
 
+    def handle_piece(piece: str) -> None:
+        """Process one \\r/\\n-delimited stdout segment: progress parsing,
+        SSE fanout, track counters. yt-dlp overwrites its progress line with
+        \\r and never emits \\n between frames, so segments — not lines — are
+        the real unit; the chunk reader below splits on both delimiters."""
+        nonlocal _total_recorded
+        global _current_frag_high
+
+        if UI_NOISE_RE.match(piece):
+            m = DOWNLOAD_LINE_RE.search(piece)
+            if m:
+                try:
+                    _progress["current_pct"] = float(m.group("pct"))
+                except (TypeError, ValueError):
+                    pass
+                if m.group("fi") and m.group("ft"):
+                    fi = int(m.group("fi"))
+                    _progress["current_frag"] = f"{fi}/{m.group('ft')}"
+                    # yt-dlp starting over on this track — fragment
+                    # index snapped back below the highest we've
+                    # already seen.
+                    if fi < _current_frag_high - 1:
+                        _progress["current_track_retries"] += 1
+                        _current_frag_high = fi
+                    elif fi > _current_frag_high:
+                        _current_frag_high = fi
+            return
+
+        _append_line(piece)
+
+        counts_changed = False
+        tm = TRACK_START_RE.search(piece)
+        if tm:
+            idx = int(tm.group(1))
+            total = int(tm.group(2))
+            _progress["current_track_idx"] = idx
+            _progress["current_track_total"] = total
+            _progress["current_track_name"] = tm.group(3)
+            _progress["current_pct"] = 0.0
+            _progress["current_frag"] = None
+            _progress["current_track_retries"] = 0
+            _current_frag_high = -1
+            _progress["tracks_new"] += 1
+            counts_changed = True
+            if not _total_recorded:
+                store.set_total_tracks(url, total)
+                _total_recorded = True
+        if TRACK_SKIP_RE.search(piece):
+            _progress["tracks_skipped"] += 1
+            _progress["tracks_new"] = max(_progress["tracks_new"] - 1, 0)
+            counts_changed = True
+        if TRACK_FAIL_RE.search(piece):
+            _progress["tracks_failed"] += 1
+            counts_changed = True
+        if counts_changed:
+            store.update_run_counts(
+                run_id,
+                _progress["tracks_new"],
+                _progress["tracks_skipped"],
+                _progress["tracks_failed"],
+            )
+
     log_f = log_path.open("wb", buffering=0)
     try:
-        # yt-dlp never emits \n between its own progress frames, so an active
-        # download accumulates one giant logical line on stdout. asyncio's
-        # default StreamReader limit is 64 KiB — enough for ~800 progress
-        # updates, which we'd blow past on any track with a slow/retried
-        # fetch. Bump to 16 MiB (≈ 200 k progress frames) so readline()
-        # returns the glued chunk cleanly instead of raising
-        # LimitOverrunError and sending the run into exit_code=-1.
+        # New session → gamdl leads its own process group, so cancel/watchdog
+        # can killpg the yt-dlp/ffmpeg children too instead of orphaning them.
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            limit=16 * 1024 * 1024,
+            start_new_session=True,
         )
         _current_proc = proc
         assert proc.stdout is not None
+
+        # Chunk reader with our own segment splitting, replacing readline().
+        # readline() only returned on \n, so a slow multi-minute download (all
+        # \r progress frames, no newline) looked identical to a hung process —
+        # it also needed a 16 MiB limit hack to survive the glued frames.
+        # read() returns on every frame, which makes the inactivity watchdog
+        # accurate: a timeout means gamdl truly went silent.
+        buf = b""
         while True:
-            chunk = await proc.stdout.readline()
+            try:
+                chunk = await asyncio.wait_for(
+                    proc.stdout.read(65536), timeout=INACTIVITY_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                msg = (
+                    f"[runner] watchdog: no output for {INACTIVITY_TIMEOUT}s "
+                    "— killing gamdl"
+                )
+                _append_line(msg)
+                try:
+                    log_f.write(f"\n{msg}\n".encode())
+                except OSError:
+                    pass
+                await _kill_proc_group(proc)
+                break
             if not chunk:
                 break
             log_f.write(chunk)
-            line = chunk.decode("utf-8", errors="replace").rstrip("\r\n")
-            clean = re.sub(r"\x1b\[[0-9;]*m", "", line)
-            if not clean:
-                continue
-
-            # Each readline() chunk can contain multiple logical segments
-            # glued together by \r — yt-dlp overwrites its progress line
-            # without emitting \n, so by the time we see a \n-terminated
-            # chunk it may start with hundreds of [download] frames and
-            # end with the next track's "[Track N] Downloading" INFO line.
-            # Split on \r and process each piece on its own so the counter
-            # and the SSE stream both see the track markers regardless of
-            # where yt-dlp placed them.
-            for piece in clean.split("\r"):
-                piece = piece.strip()
-                if not piece:
-                    continue
-
-                if UI_NOISE_RE.match(piece):
-                    m = DOWNLOAD_LINE_RE.search(piece)
-                    if m:
-                        try:
-                            _progress["current_pct"] = float(m.group("pct"))
-                        except (TypeError, ValueError):
-                            pass
-                        if m.group("fi") and m.group("ft"):
-                            fi = int(m.group("fi"))
-                            _progress["current_frag"] = f"{fi}/{m.group('ft')}"
-                            # yt-dlp starting over on this track — fragment
-                            # index snapped back below the highest we've
-                            # already seen.
-                            if fi < _current_frag_high - 1:
-                                _progress["current_track_retries"] += 1
-                                _current_frag_high = fi
-                            elif fi > _current_frag_high:
-                                _current_frag_high = fi
-                    continue
-
-                _append_line(piece)
-
-                counts_changed = False
-                tm = TRACK_START_RE.search(piece)
-                if tm:
-                    idx = int(tm.group(1))
-                    total = int(tm.group(2))
-                    _progress["current_track_idx"] = idx
-                    _progress["current_track_total"] = total
-                    _progress["current_track_name"] = tm.group(3)
-                    _progress["current_pct"] = 0.0
-                    _progress["current_frag"] = None
-                    _progress["current_track_retries"] = 0
-                    _current_frag_high = -1
-                    _progress["tracks_new"] += 1
-                    counts_changed = True
-                    if not _total_recorded:
-                        store.set_total_tracks(url, total)
-                        _total_recorded = True
-                if TRACK_SKIP_RE.search(piece):
-                    _progress["tracks_skipped"] += 1
-                    _progress["tracks_new"] = max(_progress["tracks_new"] - 1, 0)
-                    counts_changed = True
-                if TRACK_FAIL_RE.search(piece):
-                    _progress["tracks_failed"] += 1
-                    counts_changed = True
-                if counts_changed:
-                    store.update_run_counts(
-                        run_id,
-                        _progress["tracks_new"],
-                        _progress["tracks_skipped"],
-                        _progress["tracks_failed"],
-                    )
+            buf += chunk
+            # Split on \r AND \n; the last element has no delimiter yet — a
+            # partial segment (or partial UTF-8 sequence) kept for next read.
+            segments = re.split(rb"[\r\n]", buf)
+            buf = segments.pop()
+            for seg in segments:
+                piece = _ANSI_RE.sub("", seg.decode("utf-8", errors="replace")).strip()
+                if piece:
+                    handle_piece(piece)
+        tail = _ANSI_RE.sub("", buf.decode("utf-8", errors="replace")).strip()
+        if tail:
+            handle_piece(tail)
         exit_code = await proc.wait()
     except Exception as exc:  # noqa: BLE001
         # Capture the traceback to stderr (→ docker logs) AND the persisted
@@ -379,17 +440,13 @@ async def _run_one(url: str, kind: str, trigger: str = "manual") -> int:
         except Exception:
             pass
         _append_line(f"[runner] exception: {exc!r}")
-        # Make sure we don't leave gamdl running orphaned in the container.
-        # proc may be undefined if create_subprocess_exec itself threw —
-        # hence the locals() guard.
+        # Make sure we don't leave gamdl (or its yt-dlp/ffmpeg children)
+        # running orphaned in the container. proc may be undefined if
+        # create_subprocess_exec itself threw — hence the locals() guard.
         if "proc" in locals() and proc.returncode is None:
             try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-            except ProcessLookupError:
+                await _kill_proc_group(proc)
+            except Exception:  # noqa: BLE001
                 pass
         exit_code = -1
     finally:
@@ -427,26 +484,50 @@ async def _run_one(url: str, kind: str, trigger: str = "manual") -> int:
     return exit_code
 
 
-async def run(url: str, kind: str, trigger: str = "manual") -> int:
-    global _cancel_requested
-    if _lock.locked():
-        raise RuntimeError("Another sync is already in progress")
-    async with _lock:
-        _cancel_requested = False
-        return await _run_one(url=url, kind=kind, trigger=trigger)
+def _on_task_done(task: asyncio.Task) -> None:
+    """Surface exceptions from the background run task — a fire-and-forget
+    task swallows them silently otherwise."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        sys.stderr.write(f"[runner] run task crashed: {exc!r}\n")
+        traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+        sys.stderr.flush()
 
 
-async def run_all(entries: list[tuple[str, str]], trigger: str = "manual-all") -> list[int]:
-    global _cancel_requested
-    if _lock.locked():
-        raise RuntimeError("Another sync is already in progress")
+async def _run_entries(entries: list[tuple[str, str]], trigger: str) -> list[int]:
     results: list[int] = []
-    async with _lock:
-        _cancel_requested = False
-        for url, kind in entries:
-            if _cancel_requested:
-                _append_line("[runner] sweep cancelled — remaining entries skipped")
-                break
-            code = await _run_one(url=url, kind=kind, trigger=trigger)
-            results.append(code)
+    for url, kind in entries:
+        if _cancel_requested:
+            _append_line("[runner] sweep cancelled — remaining entries skipped")
+            break
+        results.append(await _run_one(url=url, kind=kind, trigger=trigger))
     return results
+
+
+def start(url: str, kind: str, trigger: str = "manual") -> bool:
+    """Reserve the runner and launch a single-URL run in the background.
+
+    The check-and-set on ``_active_task`` happens synchronously on the event
+    loop, so two requests in the same tick can't both start. Returns False
+    when a run is already active — callers turn that into a 409.
+    """
+    global _active_task, _cancel_requested
+    if is_running():
+        return False
+    _cancel_requested = False
+    _active_task = asyncio.create_task(_run_one(url=url, kind=kind, trigger=trigger))
+    _active_task.add_done_callback(_on_task_done)
+    return True
+
+
+def start_all(entries: list[tuple[str, str]], trigger: str = "manual-all") -> bool:
+    """Reserve the runner and launch a whole-watchlist sweep. See ``start``."""
+    global _active_task, _cancel_requested
+    if is_running():
+        return False
+    _cancel_requested = False
+    _active_task = asyncio.create_task(_run_entries(entries, trigger))
+    _active_task.add_done_callback(_on_task_done)
+    return True

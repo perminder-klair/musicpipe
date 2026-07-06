@@ -69,6 +69,10 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 
 INDEXER_INTERVAL = int(os.environ.get("INDEXER_INTERVAL", "120"))
 
+# Module-held reference: a task created without one is eligible for GC
+# mid-run (asyncio only keeps weak references to tasks).
+_indexer_task: asyncio.Task | None = None
+
 
 async def _indexer_loop() -> None:
     """Periodic sweep of Incoming + Library. First pass on startup doubles as
@@ -95,9 +99,11 @@ async def _startup() -> None:
         print(f"[startup] backfill: {result}", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"[startup] backfill failed: {exc!r}", flush=True)
-    # Kick off the tracks-table indexer. Task is fire-and-forget; uvicorn
-    # cancels it on shutdown via the default task-group teardown.
-    asyncio.create_task(_indexer_loop())
+    # Kick off the tracks-table indexer. Reference kept at module level so
+    # the task can't be garbage-collected mid-loop; uvicorn cancels it on
+    # shutdown via the default task-group teardown.
+    global _indexer_task
+    _indexer_task = asyncio.create_task(_indexer_loop())
 
 
 @app.post("/maintenance/backfill")
@@ -472,15 +478,14 @@ async def artist_action(request: Request, artist: str = Form(...), action: str =
 async def album_redownload(album_id: str) -> JSONResponse:
     """Re-fetch an album. gamdl + track-expansion only pull what's missing,
     so this is safe to hit on a fully-present album (it no-ops)."""
-    if runner.is_running():
-        raise HTTPException(409, "A sync is already running")
     summary = store.get_album_summary(album_id)
     if summary is None:
         raise HTTPException(404, "unknown album")
     # Slug is cosmetic — gamdl/expander parse the trailing id; storefront comes
     # from the authenticated account, so the country code is irrelevant.
     url = f"https://music.apple.com/us/album/_/{album_id}"
-    asyncio.create_task(runner.run(url=url, kind="album", trigger="library-redownload"))
+    if not runner.start(url=url, kind="album", trigger="library-redownload"):
+        raise HTTPException(409, "A sync is already running")
     await asyncio.sleep(0.1)
     return JSONResponse({"ok": True, "state": runner.current_state()})
 
@@ -544,6 +549,7 @@ async def _collect_entries() -> list[dict]:
     entries = watchlist.all_entries()
     urls = [e.url for e in entries]
     metas = store.bulk_meta(urls)
+    last_runs = store.last_runs_for(urls)
 
     # Album-only: held-track count from the tracks DB, for the "N / total" card line.
     album_urls_to_ids: dict[str, str] = {}
@@ -561,7 +567,7 @@ async def _collect_entries() -> list[dict]:
             aid = album_urls_to_ids.get(e.url)
             if aid:
                 library_count = album_counts.get(aid, 0)
-        out.append(_entry_view(e.url, e.kind, metas.get(e.url), store.last_run_for(e.url), library_count))
+        out.append(_entry_view(e.url, e.kind, metas.get(e.url), last_runs.get(e.url), library_count))
     return out
 
 
@@ -782,23 +788,30 @@ async def refresh_meta(
     active_kind: str = Form("artist"),
 ) -> HTMLResponse:
     entries = watchlist.all_entries()
+    # Bounded fan-out: serial fetches made a big watchlist take minutes
+    # (10s timeout per URL) and time the request out at the proxy.
+    sem = asyncio.Semaphore(5)
     async with httpx.AsyncClient(
         timeout=10.0,
         headers={"User-Agent": apple.UA},
         follow_redirects=True,
     ) as client:
-        for e in entries:
-            try:
-                meta = await apple.fetch(e.url, client=client)
-                store.upsert_meta(
-                    url=e.url,
-                    kind=meta.kind or e.kind,
-                    title=meta.title,
-                    image=meta.image,
-                    description=meta.description,
-                )
-            except Exception:  # noqa: BLE001
-                continue
+
+        async def refresh_one(e: watchlist.WatchEntry) -> None:
+            async with sem:
+                try:
+                    meta = await apple.fetch(e.url, client=client)
+                    store.upsert_meta(
+                        url=e.url,
+                        kind=meta.kind or e.kind,
+                        title=meta.title,
+                        image=meta.image,
+                        description=meta.description,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+        await asyncio.gather(*(refresh_one(e) for e in entries))
     if active_kind not in _TAB_KINDS:
         active_kind = "artist"
     entries_view = await _collect_entries()
@@ -812,9 +825,10 @@ async def refresh_meta(
 
 @app.post("/sync/one")
 async def sync_one(url: str = Form(...), kind: str = Form(...)) -> JSONResponse:
-    if runner.is_running():
+    # runner.start reserves synchronously, so concurrent requests can't
+    # double-launch — one wins, the rest 409.
+    if not runner.start(url=url, kind=kind, trigger="manual"):
         raise HTTPException(409, "A sync is already running")
-    asyncio.create_task(runner.run(url=url, kind=kind, trigger="manual"))
     # Give the runner a moment to flip state so the UI shows "running"
     await asyncio.sleep(0.1)
     return JSONResponse({"ok": True, "state": runner.current_state()})
@@ -822,12 +836,11 @@ async def sync_one(url: str = Form(...), kind: str = Form(...)) -> JSONResponse:
 
 @app.post("/sync/all")
 async def sync_all() -> JSONResponse:
-    if runner.is_running():
-        raise HTTPException(409, "A sync is already running")
     entries = [(e.url, e.kind) for e in watchlist.all_entries()]
     if not entries:
         raise HTTPException(400, "watchlist is empty")
-    asyncio.create_task(runner.run_all(entries=entries, trigger="manual-all"))
+    if not runner.start_all(entries=entries, trigger="manual-all"):
+        raise HTTPException(409, "A sync is already running")
     await asyncio.sleep(0.1)
     return JSONResponse({"ok": True, "count": len(entries), "state": runner.current_state()})
 

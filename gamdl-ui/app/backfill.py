@@ -19,7 +19,7 @@ GAMDL_LOG = Path(os.environ.get("GAMDL_LOGS_DIR", "/gamdl-logs")) / "run.log"
 
 LINE_RE = re.compile(
     r"^\[(?P<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+(?P<tz>\S+)\]\s+"
-    r"(?P<tag>START|OK|FAIL)\s+(?P<kind>artist|playlist):\s+(?P<url>\S+)"
+    r"(?P<tag>START|OK|FAIL)\s+(?P<kind>artist|playlist|album)\s*:\s+(?P<url>\S+)"
 )
 
 

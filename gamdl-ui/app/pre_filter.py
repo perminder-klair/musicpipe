@@ -146,9 +146,8 @@ async def expand_and_filter(url: str, kind: str, *, verify_exists: bool = True) 
     With ``verify_exists=True`` (the default) a match in categories 2–4
     is downgraded to "missing" when the ``library_path`` no longer points
     at an actual file — the DB is an index of filesystem state and can
-    briefly lag a manual delete. ``filter_incoming`` keeps the old
-    DB-only behavior because it independently stats each file via the
-    inode check.
+    briefly lag a manual delete. ``filter_incoming`` applies the same
+    check before unlinking a duplicate, for the same reason.
     """
     # Local imports avoid a circular import: expander → pre_filter (for
     # URL parsing) and pre_filter → expander here.

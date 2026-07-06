@@ -115,6 +115,11 @@ def connect() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(DB_PATH, timeout=10.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
+    # WAL pairing: NORMAL skips the per-commit fsync (FULL) while staying
+    # crash-safe at the WAL-checkpoint level. This table is an index of
+    # filesystem state that the sweeper rebuilds anyway, and per-row commits
+    # under FULL were one fsync per file on a spinning disk.
+    conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
     try:
         yield conn
@@ -267,6 +272,26 @@ def last_run_for(url: str) -> dict | None:
     return dict(row) if row else None
 
 
+def last_runs_for(urls: list[str]) -> dict[str, dict]:
+    """url → most recent run, in one query — the dashboard's per-card lookup
+    was previously one query per watchlist entry."""
+    if not urls:
+        return {}
+    placeholders = ",".join("?" * len(urls))
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT r.* FROM runs r
+            JOIN (
+                SELECT url, MAX(started_at) AS latest
+                FROM runs WHERE url IN ({placeholders}) GROUP BY url
+            ) m ON r.url = m.url AND r.started_at = m.latest
+            """,
+            urls,
+        ).fetchall()
+    return {r["url"]: dict(r) for r in rows}
+
+
 # ---------------- tracks ----------------
 #
 # Two entry points — one per location the file can occupy. Each leaves the
@@ -274,6 +299,70 @@ def last_run_for(url: str) -> dict | None:
 # Library keeps the downloaded_at timestamp even after the Incoming row is
 # dropped. Both upserts refresh last_indexed_at so a periodic sweeper can
 # later GC rows whose files have disappeared.
+#
+# The upserts and clears accept an optional ``conn`` so a sweep can batch
+# every write into one connection/transaction instead of paying a connection
+# setup + WAL commit per file (see ``sweep_transaction``).
+
+_UPSERT_INCOMING_SQL = """
+    INSERT INTO tracks (
+        am_track_id, am_album_id, source_url, title, artist, album,
+        album_artist, isrc, mb_track_id, mb_album_id, genre,
+        incoming_path, downloaded_at, last_indexed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(am_track_id) DO UPDATE SET
+        am_album_id    = COALESCE(excluded.am_album_id, tracks.am_album_id),
+        source_url     = COALESCE(excluded.source_url, tracks.source_url),
+        title          = COALESCE(excluded.title, tracks.title),
+        artist         = COALESCE(excluded.artist, tracks.artist),
+        album          = COALESCE(excluded.album, tracks.album),
+        album_artist   = COALESCE(excluded.album_artist, tracks.album_artist),
+        isrc           = COALESCE(excluded.isrc, tracks.isrc),
+        mb_track_id    = COALESCE(excluded.mb_track_id, tracks.mb_track_id),
+        mb_album_id    = COALESCE(excluded.mb_album_id, tracks.mb_album_id),
+        genre          = COALESCE(excluded.genre, tracks.genre),
+        incoming_path  = excluded.incoming_path,
+        downloaded_at  = COALESCE(tracks.downloaded_at, excluded.downloaded_at),
+        last_indexed_at = excluded.last_indexed_at
+"""
+
+_UPSERT_LIBRARY_SQL = """
+    INSERT INTO tracks (
+        am_track_id, am_album_id, title, artist, album,
+        album_artist, isrc, mb_track_id, mb_album_id, genre,
+        library_path, imported_at, last_indexed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(am_track_id) DO UPDATE SET
+        am_album_id    = COALESCE(excluded.am_album_id, tracks.am_album_id),
+        title          = COALESCE(excluded.title, tracks.title),
+        artist         = COALESCE(excluded.artist, tracks.artist),
+        album          = COALESCE(excluded.album, tracks.album),
+        album_artist   = COALESCE(excluded.album_artist, tracks.album_artist),
+        isrc           = COALESCE(excluded.isrc, tracks.isrc),
+        mb_track_id    = COALESCE(excluded.mb_track_id, tracks.mb_track_id),
+        mb_album_id    = COALESCE(excluded.mb_album_id, tracks.mb_album_id),
+        genre          = COALESCE(excluded.genre, tracks.genre),
+        library_path   = excluded.library_path,
+        imported_at    = COALESCE(tracks.imported_at, excluded.imported_at),
+        last_indexed_at = excluded.last_indexed_at
+"""
+
+
+@contextmanager
+def sweep_transaction() -> Iterator[sqlite3.Connection]:
+    """One connection + one transaction for a whole indexer sweep's writes.
+
+    Pass the yielded conn to the upsert/clear helpers. Commits on clean exit,
+    rolls back on exception."""
+    with connect() as conn:
+        conn.execute("BEGIN")
+        try:
+            yield conn
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+
 
 def upsert_track_incoming(
     *,
@@ -290,37 +379,18 @@ def upsert_track_incoming(
     incoming_path: str,
     downloaded_at: float,
     source_url: str | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> None:
-    now = time.time()
-    with connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO tracks (
-                am_track_id, am_album_id, source_url, title, artist, album,
-                album_artist, isrc, mb_track_id, mb_album_id, genre,
-                incoming_path, downloaded_at, last_indexed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(am_track_id) DO UPDATE SET
-                am_album_id    = COALESCE(excluded.am_album_id, tracks.am_album_id),
-                source_url     = COALESCE(excluded.source_url, tracks.source_url),
-                title          = COALESCE(excluded.title, tracks.title),
-                artist         = COALESCE(excluded.artist, tracks.artist),
-                album          = COALESCE(excluded.album, tracks.album),
-                album_artist   = COALESCE(excluded.album_artist, tracks.album_artist),
-                isrc           = COALESCE(excluded.isrc, tracks.isrc),
-                mb_track_id    = COALESCE(excluded.mb_track_id, tracks.mb_track_id),
-                mb_album_id    = COALESCE(excluded.mb_album_id, tracks.mb_album_id),
-                genre          = COALESCE(excluded.genre, tracks.genre),
-                incoming_path  = excluded.incoming_path,
-                downloaded_at  = COALESCE(tracks.downloaded_at, excluded.downloaded_at),
-                last_indexed_at = excluded.last_indexed_at
-            """,
-            (
-                am_track_id, am_album_id, source_url, title, artist, album,
-                album_artist, isrc, mb_track_id, mb_album_id, genre,
-                incoming_path, downloaded_at, now,
-            ),
-        )
+    params = (
+        am_track_id, am_album_id, source_url, title, artist, album,
+        album_artist, isrc, mb_track_id, mb_album_id, genre,
+        incoming_path, downloaded_at, time.time(),
+    )
+    if conn is not None:
+        conn.execute(_UPSERT_INCOMING_SQL, params)
+        return
+    with connect() as own:
+        own.execute(_UPSERT_INCOMING_SQL, params)
 
 
 def upsert_track_library(
@@ -337,80 +407,72 @@ def upsert_track_library(
     genre: str | None,
     library_path: str,
     imported_at: float,
+    conn: sqlite3.Connection | None = None,
 ) -> None:
-    now = time.time()
-    with connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO tracks (
-                am_track_id, am_album_id, title, artist, album,
-                album_artist, isrc, mb_track_id, mb_album_id, genre,
-                library_path, imported_at, last_indexed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(am_track_id) DO UPDATE SET
-                am_album_id    = COALESCE(excluded.am_album_id, tracks.am_album_id),
-                title          = COALESCE(excluded.title, tracks.title),
-                artist         = COALESCE(excluded.artist, tracks.artist),
-                album          = COALESCE(excluded.album, tracks.album),
-                album_artist   = COALESCE(excluded.album_artist, tracks.album_artist),
-                isrc           = COALESCE(excluded.isrc, tracks.isrc),
-                mb_track_id    = COALESCE(excluded.mb_track_id, tracks.mb_track_id),
-                mb_album_id    = COALESCE(excluded.mb_album_id, tracks.mb_album_id),
-                genre          = COALESCE(excluded.genre, tracks.genre),
-                library_path   = excluded.library_path,
-                imported_at    = COALESCE(tracks.imported_at, excluded.imported_at),
-                last_indexed_at = excluded.last_indexed_at
-            """,
-            (
-                am_track_id, am_album_id, title, artist, album,
-                album_artist, isrc, mb_track_id, mb_album_id, genre,
-                library_path, imported_at, now,
-            ),
-        )
+    params = (
+        am_track_id, am_album_id, title, artist, album,
+        album_artist, isrc, mb_track_id, mb_album_id, genre,
+        library_path, imported_at, time.time(),
+    )
+    if conn is not None:
+        conn.execute(_UPSERT_LIBRARY_SQL, params)
+        return
+    with connect() as own:
+        own.execute(_UPSERT_LIBRARY_SQL, params)
 
 
-def clear_incoming_path_if_missing(am_track_ids_present: set[str]) -> int:
+def _clear_path_if_missing(
+    column: str, am_track_ids_present: set[str], conn: sqlite3.Connection | None
+) -> int:
+    def run(c: sqlite3.Connection) -> int:
+        if am_track_ids_present:
+            placeholders = ",".join("?" * len(am_track_ids_present))
+            cur = c.execute(
+                f"""
+                UPDATE tracks SET {column} = NULL
+                WHERE {column} IS NOT NULL
+                  AND am_track_id NOT IN ({placeholders})
+                """,
+                tuple(am_track_ids_present),
+            )
+        else:
+            cur = c.execute(
+                f"UPDATE tracks SET {column} = NULL WHERE {column} IS NOT NULL"
+            )
+        return cur.rowcount
+
+    if conn is not None:
+        return run(conn)
+    with connect() as own:
+        return run(own)
+
+
+def clear_incoming_path_if_missing(
+    am_track_ids_present: set[str], conn: sqlite3.Connection | None = None
+) -> int:
     """Null out incoming_path on rows whose file is no longer in Incoming.
 
     Called once per indexer sweep with the set of IDs we just observed; any
     track whose am_track_id is not in that set has been moved or deleted.
     Returns the number of rows cleared.
     """
-    with connect() as conn:
-        if am_track_ids_present:
-            placeholders = ",".join("?" * len(am_track_ids_present))
-            cur = conn.execute(
-                f"""
-                UPDATE tracks SET incoming_path = NULL
-                WHERE incoming_path IS NOT NULL
-                  AND am_track_id NOT IN ({placeholders})
-                """,
-                tuple(am_track_ids_present),
-            )
-        else:
-            cur = conn.execute(
-                "UPDATE tracks SET incoming_path = NULL WHERE incoming_path IS NOT NULL"
-            )
-        return cur.rowcount
+    return _clear_path_if_missing("incoming_path", am_track_ids_present, conn)
 
 
-def clear_library_path_if_missing(am_track_ids_present: set[str]) -> int:
+def clear_library_path_if_missing(
+    am_track_ids_present: set[str], conn: sqlite3.Connection | None = None
+) -> int:
+    return _clear_path_if_missing("library_path", am_track_ids_present, conn)
+
+
+def count_library_rows() -> int:
+    """Rows with a live library_path — the sweep-sanity guard's baseline."""
     with connect() as conn:
-        if am_track_ids_present:
-            placeholders = ",".join("?" * len(am_track_ids_present))
-            cur = conn.execute(
-                f"""
-                UPDATE tracks SET library_path = NULL
-                WHERE library_path IS NOT NULL
-                  AND am_track_id NOT IN ({placeholders})
-                """,
-                tuple(am_track_ids_present),
-            )
-        else:
-            cur = conn.execute(
-                "UPDATE tracks SET library_path = NULL WHERE library_path IS NOT NULL"
-            )
-        return cur.rowcount
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM tracks WHERE library_path IS NOT NULL"
+            ).fetchone()[0]
+        )
 
 
 def get_track(am_track_id: str) -> dict | None:

@@ -70,6 +70,7 @@ services:
       - PGID=${PGID:-1001}
       - TZ=${TZ:-Europe/London}
       - AUTO_IMPORT_INTERVAL=${AUTO_IMPORT_INTERVAL:-300}
+      - BEET_TIMEOUT=${BEET_TIMEOUT:-3600}
     volumes:
       - "./beets:/config"
       - "${MUSIC_ROOT:-/mnt/hdd/navidrome}:/music"
@@ -117,6 +118,13 @@ services:
       NAVIDROME_PASS: ${NAVIDROME_PASS}
       USE_TRACK_EXPANSION: ${USE_TRACK_EXPANSION:-0}
       INDEXER_INTERVAL: ${INDEXER_INTERVAL:-120}
+      RUNNER_INACTIVITY_TIMEOUT: ${RUNNER_INACTIVITY_TIMEOUT:-900}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4150/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     dns:
       - 1.1.1.1
       - 8.8.8.8

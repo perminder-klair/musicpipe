@@ -6,18 +6,31 @@ INTERVAL="${AUTO_IMPORT_INTERVAL:-300}"  # default: 5 minutes
 LOG="/config/auto-import.log"
 TRIGGER="/config/.trigger-import"
 STATUS="/config/.import-status"  # atomic status file gamdl-ui polls: "running"|"idle"
+# Hard cap on one beet run — fetchart/discogs are network plugins and can
+# hang the loop indefinitely with .import-status stuck at "running".
+BEET_TIMEOUT="${BEET_TIMEOUT:-3600}"
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $1" | tee -a "$LOG"
 }
 
+# find(1) predicate for audio files, shared by the counters below.
+audio_pred=( \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.wav" -o -name "*.opus" -o -name "*.wma" -o -name "*.aac" \) )
+
 log "Auto-import started (checking every ${INTERVAL}s)"
 
 while true; do
     # Count music files in incoming
-    COUNT=$(find -L "$INCOMING" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.wav" -o -name "*.opus" -o -name "*.wma" -o -name "*.aac" \) 2>/dev/null | wc -l)
+    COUNT=$(find -L "$INCOMING" -type f "${audio_pred[@]}" 2>/dev/null | wc -l)
+    # gamdl copies finished files in from its container-local temp dir — not
+    # an atomic rename — so a file written in the last minute may still be
+    # mid-copy. Importing it would tag a truncated m4a forever. Wait for the
+    # directory to go quiet before handing it to beets.
+    RECENT=$(find -L "$INCOMING" -type f "${audio_pred[@]}" -mmin -1 2>/dev/null | wc -l)
 
-    if [ "$COUNT" -gt 0 ]; then
+    if [ "$COUNT" -gt 0 ] && [ "$RECENT" -gt 0 ]; then
+        log "Found $COUNT music files but $RECENT written <1m ago — waiting for downloads to settle"
+    elif [ "$COUNT" -gt 0 ]; then
         log "Found $COUNT music files, starting import..."
         # Strip deleted/blocklisted tracks from Incoming before beets runs.
         # Non-fatal: if gamdl-ui is down we still import — the point of the
@@ -27,9 +40,12 @@ while true; do
             && log "filter-incoming: $FILTER_OUT" \
             || log "filter-incoming FAILED (continuing): $FILTER_OUT"
         echo "running" > "$STATUS"
-        beet import -q /music/Incoming >> "$LOG" 2>&1
+        timeout "$BEET_TIMEOUT" beet import -q /music/Incoming >> "$LOG" 2>&1
         EXIT_CODE=$?
         echo "idle" > "$STATUS"
+        if [ $EXIT_CODE -eq 124 ]; then
+            log "Import KILLED after ${BEET_TIMEOUT}s timeout"
+        fi
         # beet runs as root here (we override lsio's s6 entrypoint for the
         # auto-loop), so new files in Library land as root:root and gamdl-ui
         # (uid 1000) can't unlink them. Normalize ownership after each import
@@ -41,7 +57,7 @@ while true; do
         if [ $EXIT_CODE -eq 0 ]; then
             log "Import completed successfully"
             # Clean up leftover non-music files and empty directories
-            find "$INCOMING" -type f ! \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.wav" -o -name "*.opus" -o -name "*.wma" -o -name "*.aac" \) -delete 2>/dev/null
+            find "$INCOMING" -type f ! "${audio_pred[@]}" -delete 2>/dev/null
             find "$INCOMING" -mindepth 1 -type d -empty -delete 2>/dev/null
         else
             log "Import finished with exit code $EXIT_CODE"
