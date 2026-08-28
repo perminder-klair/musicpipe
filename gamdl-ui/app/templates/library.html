@@ -97,15 +97,15 @@
                   hx-swap="innerHTML"
                   hx-trigger="input delay:250ms from:find input[name=q], change from:find select, submit">
                 <input name="q" value="{{ q or '' }}" placeholder="Search title, artist, album…"
-                       class="flex-1 min-w-[240px] bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 text-sm placeholder:text-zinc-500">
-                <select name="status" class="bg-zinc-900 border border-zinc-800 rounded-md px-2 py-1.5 text-sm">
+                       class="w-full sm:w-auto sm:flex-1 sm:min-w-[240px] bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 text-sm placeholder:text-zinc-500">
+                <select name="status" class="flex-1 sm:flex-none bg-zinc-900 border border-zinc-800 rounded-md px-2 py-1.5 text-sm">
                     <option value="" {% if not status %}selected{% endif %}>All</option>
                     <option value="in_library" {% if status=='in_library' %}selected{% endif %}>In library</option>
                     <option value="orphaned" {% if status=='orphaned' %}selected{% endif %}>Incoming only</option>
                     <option value="deleted" {% if status=='deleted' %}selected{% endif %}>Deleted</option>
                     <option value="blocklisted" {% if status=='blocklisted' %}selected{% endif %}>Blocklisted</option>
                 </select>
-                <select name="genre" class="bg-zinc-900 border border-zinc-800 rounded-md px-2 py-1.5 text-sm max-w-[200px]">
+                <select name="genre" class="flex-1 sm:flex-none bg-zinc-900 border border-zinc-800 rounded-md px-2 py-1.5 text-sm sm:max-w-[200px]">
                     <option value="" {% if not genre %}selected{% endif %}>All genres</option>
                     {% for g in genres %}
                         <option value="{{ g }}" {% if genre==g %}selected{% endif %}>{{ g }}</option>
@@ -137,9 +137,9 @@ function libTab(which) {
 
 {# Sticky bulk-action bar. Hidden until at least one row checkbox is set. #}
 <div id="lib-bulk-bar"
-     class="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 hidden
+     class="fixed bottom-3 inset-x-2 sm:inset-x-auto sm:left-1/2 sm:-translate-x-1/2 z-40 hidden
             rounded-lg border border-zinc-700 bg-zinc-900/95 backdrop-blur
-            shadow-xl px-3 py-2 flex items-center gap-2 text-sm">
+            shadow-xl px-3 py-2 flex flex-wrap items-center justify-center gap-2 text-sm">
     <span class="text-zinc-400"><span id="lib-bulk-count">0</span> selected</span>
     <button type="button"
             class="px-2.5 py-1 text-xs rounded-md bg-zinc-800 hover:bg-amber-700"
